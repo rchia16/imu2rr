@@ -180,6 +180,107 @@ def save_outputs(root: Path, subject: str, model_name: str, out: Dict[str, np.nd
     np.savez_compressed(root / "embeddings.npz", emb=out["emb"], rr_true=out["true"], rr_pred=out["pred"], subject=subject, mode=model_name)
 
 
+def _path_str(path: Path) -> str:
+    return str(path.expanduser().resolve())
+
+
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    *,
+    model_name: str,
+    subject: str,
+    ensemble_member: int,
+    in_ch: int,
+    seq_len: int,
+    args,
+    info: Dict[str, object],
+) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model": model_name,
+        "subject": subject,
+        "ensemble_member": int(ensemble_member),
+        "in_ch": int(in_ch),
+        "seq_len": int(seq_len),
+        "emb_dim": int(args.emb_dim),
+        "seed": int(args.seed) + int(ensemble_member),
+        "best_val_mae": float(info["best_val_mae"]),
+        "epochs_ran": int(info["epochs_ran"]),
+        "train_args": vars(args),
+        "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+    }
+    torch.save(payload, path)
+    return _path_str(path)
+
+
+def write_checkpoint_manifest(path: Path, members: List[Dict[str, object]]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"checkpoints": members}, indent=2, sort_keys=True))
+    return _path_str(path)
+
+
+def existing_checkpoint_path(subject_dir: Path) -> Optional[str]:
+    manifest = subject_dir / "checkpoint_manifest.json"
+    if manifest.exists():
+        return _path_str(manifest)
+    checkpoint = subject_dir / "checkpoint.pt"
+    if checkpoint.exists():
+        return _path_str(checkpoint)
+    members_path = subject_dir / "ensemble_members.csv"
+    if members_path.exists():
+        try:
+            members = pd.read_csv(members_path)
+        except Exception:
+            return None
+        if "checkpoint_path" not in members.columns or members.empty:
+            return None
+        paths = [Path(str(p)) for p in members["checkpoint_path"].dropna()]
+        if paths and all(p.exists() for p in paths):
+            return " ".join(str(p) for p in paths)
+    return None
+
+
+def load_existing_subject_row(root: Path, subject: str, model_name: str) -> Optional[Dict[str, object]]:
+    subject_dir = root / "subjects" / subject
+    pred_path = subject_dir / "predictions.csv"
+    if not pred_path.exists():
+        return None
+    checkpoint_path = existing_checkpoint_path(subject_dir)
+    if checkpoint_path is None:
+        print(f"[SKIP-EXISTING] missing checkpoint under {subject_dir}", flush=True)
+        return None
+    try:
+        df = pd.read_csv(pred_path)
+    except Exception as exc:
+        print(f"[SKIP-EXISTING] cannot read {pred_path}: {exc}", flush=True)
+        return None
+    if df.empty or "rr_true" not in df.columns or "rr_pred" not in df.columns:
+        print(f"[SKIP-EXISTING] incomplete predictions at {pred_path}", flush=True)
+        return None
+    met = regression_metrics(df["rr_true"].to_numpy(), df["rr_pred"].to_numpy())
+    ensemble_n = 1
+    members_path = pred_path.parent / "ensemble_members.csv"
+    if members_path.exists():
+        try:
+            members = pd.read_csv(members_path)
+            if "ensemble_member" in members.columns:
+                ensemble_n = int(members["ensemble_member"].nunique())
+        except Exception:
+            ensemble_n = 1
+    return {
+        "subject": subject,
+        "model": model_name,
+        "mode": "source",
+        "mae": met["mae"],
+        "rmse": met["rmse"],
+        "corr": met["corr"],
+        "n_windows": met["n"],
+        "ensemble_n": ensemble_n,
+        "checkpoint_path": checkpoint_path,
+    }
+
+
 
 def _load_yaml_or_json(path: Path) -> Dict[str, object]:
     try:
@@ -301,6 +402,16 @@ def run_one_model(
         data_group=args.data_group,
         input_downsample_hz=input_downsample_hz,
     ):
+        if bool(getattr(args, "skip_existing", False)):
+            existing = load_existing_subject_row(model_root, subject, model_name)
+            if existing is not None:
+                print(
+                    f"[SKIP-EXISTING] model={model_name} subject={subject} "
+                    f"from={model_root / 'subjects' / subject / 'predictions.csv'}",
+                    flush=True,
+                )
+                rows.append(existing)
+                continue
         print(
             f"[SOURCE-BASELINE] model={model_name} subject={subject}", 
             flush=True
@@ -311,6 +422,8 @@ def run_one_model(
         seq_len = int(x0.shape[2])
         seed_rows = []
         seed_preds = []
+        subject_dir = model_root / "subjects" / subject
+        checkpoint_members: List[Dict[str, object]] = []
 
         ens_len = int(args.inception_ensemble) \
                 if model_name == "inceptiontime" else 1
@@ -321,6 +434,28 @@ def run_one_model(
                 model_name, in_ch=in_ch, seq_len=seq_len, emb_dim=args.emb_dim
             )
             info = train_one(model, train_loader, val_loader, args, device)
+            checkpoint_name = (
+                f"checkpoint_member_{ens_idx}.pt"
+                if ens_len > 1 else
+                "checkpoint.pt"
+            )
+            checkpoint_path = save_checkpoint(
+                subject_dir / checkpoint_name,
+                model,
+                model_name=model_name,
+                subject=subject,
+                ensemble_member=ens_idx,
+                in_ch=in_ch,
+                seq_len=seq_len,
+                args=args,
+                info=info,
+            )
+            checkpoint_members.append({
+                "ensemble_member": ens_idx,
+                "checkpoint_path": checkpoint_path,
+                "best_val_mae": float(info["best_val_mae"]),
+                "epochs_ran": int(info["epochs_ran"]),
+            })
             out = collect(model, test_loader, device)
             met = regression_metrics(out["true"], out["pred"])
             seed_rows.append({
@@ -333,6 +468,7 @@ def run_one_model(
                 "n_windows": met["n"],
                 "best_val_mae": float(info["best_val_mae"]),
                 "epochs_ran": int(info["epochs_ran"]),
+                "checkpoint_path": checkpoint_path,
             })
             for h in info["history"]:
                 history_rows.append({"subject": subject, "model": model_name, "ensemble_member": ens_idx, **h})
@@ -345,6 +481,13 @@ def run_one_model(
             final = dict(seed_preds[0])
             final["pred"] = np.mean([p["pred"] for p in seed_preds], axis=0)
             final["emb"] = np.mean([p["emb"] for p in seed_preds], axis=0)
+        if len(checkpoint_members) == 1:
+            subject_checkpoint_path = str(checkpoint_members[0]["checkpoint_path"])
+        else:
+            subject_checkpoint_path = write_checkpoint_manifest(
+                subject_dir / "checkpoint_manifest.json",
+                checkpoint_members,
+            )
         final_met = regression_metrics(final["true"], final["pred"])
         rows.append({
             "subject": subject,
@@ -355,9 +498,10 @@ def run_one_model(
             "corr": final_met["corr"],
             "n_windows": final_met["n"],
             "ensemble_n": len(seed_preds),
+            "checkpoint_path": subject_checkpoint_path,
         })
-        save_outputs(model_root / "subjects" / subject, subject, model_name, final)
-        pd.DataFrame(seed_rows).to_csv(model_root / "subjects" / subject / "ensemble_members.csv", index=False)
+        save_outputs(subject_dir, subject, model_name, final)
+        pd.DataFrame(seed_rows).to_csv(subject_dir / "ensemble_members.csv", index=False)
 
     subject_df = pd.DataFrame(rows)
     hist_df = pd.DataFrame(history_rows)
@@ -367,6 +511,7 @@ def run_one_model(
         rmse_mean=("rmse", "mean"), rmse_std=("rmse", "std"),
         corr_mean=("corr", "mean"), corr_std=("corr", "std"),
         n_windows=("n_windows", "sum"),
+        n_checkpoints=("checkpoint_path", "count"),
     )
     subject_df.to_csv(model_root / "subject_rows.csv", index=False)
     hist_df.to_csv(model_root / "train_history.csv", index=False)
@@ -418,6 +563,11 @@ def main() -> None:
     ap.add_argument(
         "--inception-ensemble", type=int, default=1,
         help="Set 5 for the full InceptionTime ensemble protocol."
+    )
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Reuse completed per-model/per-subject predictions.csv files and rebuild summaries.",
     )
     args = ap.parse_args()
 

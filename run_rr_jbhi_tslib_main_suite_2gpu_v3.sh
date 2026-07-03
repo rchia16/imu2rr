@@ -28,6 +28,7 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 PATCHTST_FILE="${PATCHTST_FILE:-PatchTST.py}"
 TIMESNET_FILE="${TIMESNET_FILE:-TimesNet.py}"
 TIMESNET_MODE="${TIMESNET_MODE:-downsample}"
+SKIP_COMPLETED="${SKIP_COMPLETED:-0}"
 
 # GPU ids visible on this machine. Override for a different pair, e.g. GPUS="1 3".
 GPUS="${GPUS:-0 1}"
@@ -67,6 +68,10 @@ run_worker() {
   local models="$2"
   local out_dir="$3"
   local log_file="$4"
+  local skip_args=()
+  if [[ "${SKIP_COMPLETED}" == "1" ]]; then
+    skip_args+=(--skip-existing)
+  fi
   echo "[START] gpu=${gpu} models=${models} out=${out_dir}"
   CUDA_VISIBLE_DEVICES="${gpu}" python -u run_rr_jbhi_tslib_neural_baselines_v3.py \
     --models "${models}" \
@@ -80,6 +85,7 @@ run_worker() {
     --patchtst-file "${PATCHTST_FILE}" \
     --timesnet-file "${TIMESNET_FILE}" \
     --timesnet-mode "${TIMESNET_MODE}" \
+    "${skip_args[@]}" \
     2>&1 | tee "${log_file}"
 }
 
@@ -102,6 +108,7 @@ fi
 
 python - <<'PY' "${WORKER0_ROOT}" "${WORKER1_ROOT}" "${MERGED_ROOT}"
 from pathlib import Path
+import json
 import shutil
 import sys
 import pandas as pd
@@ -110,13 +117,69 @@ worker_roots = [Path(sys.argv[1]), Path(sys.argv[2])]
 merged = Path(sys.argv[3])
 merged.mkdir(parents=True, exist_ok=True)
 
+def rewrite_path_value(value, src_root, dst_root):
+    if pd.isna(value):
+        return value
+    text = str(value)
+    if not text:
+        return text
+    src = str(src_root.resolve())
+    dst = str(dst_root.resolve())
+    parts = text.split()
+    if not parts:
+        return text
+    rewritten = []
+    changed = False
+    for part in parts:
+        if part.startswith(src):
+            rewritten.append(dst + part[len(src):])
+            changed = True
+        else:
+            rewritten.append(part)
+    return " ".join(rewritten) if changed else text
+
+def rewrite_checkpoint_columns(df, src_root, dst_root):
+    if 'checkpoint_path' in df.columns:
+        df = df.copy()
+        df['checkpoint_path'] = df['checkpoint_path'].map(
+            lambda value: rewrite_path_value(value, src_root, dst_root)
+        )
+    return df
+
+def rewrite_csv_checkpoint_columns(path, src_root, dst_root):
+    if not path.exists():
+        return
+    df = pd.read_csv(path)
+    out = rewrite_checkpoint_columns(df, src_root, dst_root)
+    if out is not df:
+        out.to_csv(path, index=False)
+
+def rewrite_manifest_payload(obj, src_root, dst_root):
+    if isinstance(obj, dict):
+        return {
+            key: rewrite_manifest_payload(value, src_root, dst_root)
+            for key, value in obj.items()
+        }
+    if isinstance(obj, list):
+        return [rewrite_manifest_payload(value, src_root, dst_root) for value in obj]
+    if isinstance(obj, str):
+        return rewrite_path_value(obj, src_root, dst_root)
+    return obj
+
+def rewrite_checkpoint_manifests(root, src_root, dst_root):
+    for path in root.glob('subjects/*/checkpoint_manifest.json'):
+        with path.open() as f:
+            payload = json.load(f)
+        payload = rewrite_manifest_payload(payload, src_root, dst_root)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
 subject_frames = []
 summary_frames = []
 for root in worker_roots:
     sr = root / 'subject_rows.csv'
     sm = root / 'summary.csv'
     if sr.exists():
-        subject_frames.append(pd.read_csv(sr))
+        subject_frames.append(rewrite_checkpoint_columns(pd.read_csv(sr), root, merged))
     if sm.exists():
         summary_frames.append(pd.read_csv(sm))
     for model_dir in root.iterdir():
@@ -128,6 +191,10 @@ for root in worker_roots:
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(model_dir, dest)
+        rewrite_csv_checkpoint_columns(dest / 'subject_rows.csv', root, merged)
+        for members_csv in dest.glob('subjects/*/ensemble_members.csv'):
+            rewrite_csv_checkpoint_columns(members_csv, root, merged)
+        rewrite_checkpoint_manifests(dest, root, merged)
 
 if subject_frames:
     pd.concat(subject_frames, ignore_index=True).to_csv(merged / 'subject_rows.csv', index=False)
@@ -145,9 +212,14 @@ cp "${MERGED_ROOT}/subject_rows.csv" "${BASE_ROOT}/subject_rows.csv"
 cp "${MERGED_ROOT}/summary.csv" "${BASE_ROOT}/summary.csv"
 
 if [[ "${RUN_ADAPTATION_AFTER_BASELINES}" == "1" ]]; then
-  echo "[ADAPTATION] Running full adaptation scripts sequentially on ${ADAPT_DEVICE}"
-  DEVICE="${ADAPT_DEVICE}" bash run_adaptation_alpha_hat_tests_full.sh 2>&1 | tee "${ROOT}/logs/adaptation_alpha_hat.log"
-  DEVICE="${ADAPT_DEVICE}" bash run_adaptation_prototype_gate_tests_full.sh 2>&1 | tee "${ROOT}/logs/adaptation_prototype_gate.log"
+  echo "[ADAPTATION] Running full 2-GPU prototype/OOD gate adaptation under ${ROOT}"
+  OUT_DIR="${ROOT}/adaptation_prototype_gate_full_2gpu_v2" \
+    GPUS="${GPUS}" \
+    DATA_DIR="${DATA_DIR}" \
+    DATA_GROUP="${DATA_GROUP}" \
+    DATA_STR="${DATA_STR}" \
+    bash run_adaptation_prototype_gate_tests_full_2gpu_v2.sh \
+    2>&1 | tee "${ROOT}/logs/adaptation_prototype_gate_2gpu_v2.log"
 fi
 
 echo "[DONE] ${ROOT}"

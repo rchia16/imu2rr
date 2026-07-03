@@ -9,6 +9,7 @@ command-line entrypoint that runs the profile-aware LOSO sweep.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
@@ -16,6 +17,18 @@ import torch.nn as nn
 
 PROFILE_STATS_SCALAR_DIM = 8
 PROFILE_STATS_MIN_STD = 1e-6
+
+
+def _rr_tta_mode_complete(sweep_root: Path, mode: str, subject: str) -> bool:
+    metrics_dir = sweep_root / str(mode) / "subjects" / str(subject) / "rr_feature_adaptive"
+    if not metrics_dir.is_dir():
+        return False
+    pattern = f"rr_*_metrics_{subject}.json"
+    return any(path.is_file() and path.stat().st_size > 0 for path in metrics_dir.glob(pattern))
+
+
+def _completed_rr_tta_modes(sweep_root: Path, modes: Sequence[str], subject: str) -> List[str]:
+    return [str(mode) for mode in modes if _rr_tta_mode_complete(sweep_root, str(mode), str(subject))]
 
 
 class PatientProfileEncoder(nn.Module):
@@ -476,6 +489,11 @@ def run_phase6_profile_encoder_cli(argv: Optional[Sequence[str]] = None) -> None
     )
     parser.add_argument("--sweep-root", default="", help="Root where per-mode summaries/predictions are written. Defaults to --out-dir.")
     parser.add_argument("--sweep-run-id", default="single", help="Unique id for this subject/job; used in chunk summary filenames.")
+    parser.add_argument(
+        "--skip-completed",
+        action="store_true",
+        help="Skip eval subjects whose requested RR-TTA modes already have per-subject metrics JSON outputs.",
+    )
     parser.add_argument("--apply-mode-defaults", action="store_true", default=True)
     parser.add_argument("--no-apply-mode-defaults", dest="apply_mode_defaults", action="store_false")
     parser.add_argument(
@@ -524,6 +542,31 @@ def run_phase6_profile_encoder_cli(argv: Optional[Sequence[str]] = None) -> None
         )
 
     eval_subjects = list(args.eval_subjects or full_subjects)
+    if bool(getattr(args, "skip_completed", False)):
+        sweep_root = Path(args.sweep_root) if str(args.sweep_root or "").strip() else Path(args.out_dir)
+        requested_mode_set = _parse_modes(args.rr_tta_modes)
+        remaining_subjects = []
+        for subject in eval_subjects:
+            completed = set(_completed_rr_tta_modes(sweep_root, requested_mode_set, str(subject)))
+            missing = [mode for mode in requested_mode_set if mode not in completed]
+            if missing:
+                print(
+                    f"[SKIP-COMPLETED] subject={subject} missing_modes={' '.join(missing)}",
+                    flush=True,
+                )
+                remaining_subjects.append(subject)
+            else:
+                print(
+                    f"[SKIP-COMPLETED] subject={subject} all requested modes complete under {sweep_root}",
+                    flush=True,
+                )
+        eval_subjects = remaining_subjects
+        if not eval_subjects:
+            print(
+                f"[SKIP-COMPLETED] all requested subjects complete under {sweep_root}; nothing to train",
+                flush=True,
+            )
+            return
     _patch_loocv_generator_for_eval_subjects(eval_subjects, full_subjects)
     args.subjects = eval_subjects
     run_loocv_experiment(args, pre_eval_hooks=[rr_config_sweep_hook])

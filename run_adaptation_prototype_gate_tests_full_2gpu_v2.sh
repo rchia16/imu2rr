@@ -25,6 +25,9 @@ MDL_DIR="${MDL_DIR:-/projects/BLVMob/imu-rr-seated/models/imu_filt/loocv}"
 EPOCHS="${EPOCHS:-20}"
 RR_PROBE_EPOCHS="${RR_PROBE_EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
+SKIP_COMPLETED="${SKIP_COMPLETED:-0}"
+
+RR_HEAD_TYPE="${RR_HEAD_TYPE:-token_tcn}"
 
 SUBJECTS="${SUBJECTS:-S12 S13 S14 S15 S16 S18 S19 S20 S22 S23 S24 S25 S27 S28 S29}"
 EVAL_SUBJECTS="${EVAL_SUBJECTS:-${SUBJECTS}}"
@@ -77,6 +80,10 @@ run_worker() {
   local worker_name="$3"
   local worker_root="${OUT_DIR}/workers/${worker_name}"
   local log_file="${OUT_DIR}/logs/prototype_gate_train_${worker_name}_${STAMP}.log"
+  local skip_args=()
+  if [[ "${SKIP_COMPLETED}" == "1" ]]; then
+    skip_args+=(--skip-completed)
+  fi
   mkdir -p "${worker_root}"
   echo "[START] prototype_gate ${worker_name} gpu=${gpu} eval_subjects=${eval_subjects}"
   CUDA_VISIBLE_DEVICES="${gpu}" "${PYTHON_BIN}" -u "${LADDER}" \
@@ -102,8 +109,10 @@ run_worker() {
     --target-calibration-windows 32 \
     --target-calibration-mode random \
     --profile-unsup-adapt-scope calibration \
-    --exclude-calibration-from-eval \
+    --include-calibration-in-eval \
     --adaptation-use-calibration-only \
+    --rr-head-type "${RR_HEAD_TYPE}" \
+    "${skip_args[@]}" \
     2>&1 | tee "${log_file}"
 }
 

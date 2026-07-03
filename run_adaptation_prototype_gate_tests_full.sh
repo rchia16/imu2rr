@@ -58,11 +58,12 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   --subject-rows "${OUT_DIR}/subject_rows.csv" \
   --out-dir "${OUT_DIR}/adaptation_prototype_gate_policy" \
   --candidates "${TTA_MODES}" \
-  --alpha-modes "adapt_mean_alpha_050 adapt_mean_alpha_075" \
+  --alpha-modes "adapt_mean_alpha_050 adapt_mean_alpha_075 adapt_mean_alpha_100" \
   --profile-mode profile_film_init_only \
   --include-profile-fallback \
   --min-gain 0.02 \
-  --safe-threshold 0.55 \
+  # --safe-threshold 0.55 \
+  --safe-threshold 0.25 \
   --knn-k 3 \
   --ood-quantile 0.95 \
   --reject-ood \

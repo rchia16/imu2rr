@@ -233,6 +233,97 @@ class ReconstructionDecoder(nn.Module):
         raise RuntimeError(f"Unhandled decoder mode: {self.mode}")
 
 
+class TokenTCNBlock(nn.Module):
+    """Residual depthwise-separable temporal convolution over ViT tokens."""
+
+    def __init__(self, d_model: int, kernel_size: int = 3, dilation: int = 1, dropout: float = 0.1):
+        super().__init__()
+        if int(d_model) <= 0:
+            raise ValueError(f"d_model must be positive, got {d_model}")
+        if int(kernel_size) <= 0 or int(kernel_size) % 2 == 0:
+            raise ValueError(f"kernel_size must be a positive odd integer, got {kernel_size}")
+        if int(dilation) <= 0:
+            raise ValueError(f"dilation must be positive, got {dilation}")
+        self.d_model = int(d_model)
+        self.kernel_size = int(kernel_size)
+        self.dilation = int(dilation)
+        padding = (self.kernel_size - 1) * self.dilation // 2
+        self.depthwise = nn.Conv1d(
+            self.d_model,
+            self.d_model,
+            kernel_size=self.kernel_size,
+            padding=padding,
+            dilation=self.dilation,
+            groups=self.d_model,
+        )
+        self.pointwise = nn.Conv1d(self.d_model, self.d_model, kernel_size=1)
+        self.dropout = nn.Dropout(float(dropout))
+        self.norm = nn.LayerNorm(self.d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected x with shape (B,D,T), got {tuple(x.shape)}")
+        if x.size(1) != self.d_model:
+            raise ValueError(f"Expected channel dim {self.d_model}, got {x.size(1)}")
+        y = self.depthwise(x)
+        y = F.gelu(y)
+        y = self.pointwise(y)
+        y = self.dropout(y)
+        y = x + y
+        return self.norm(y.transpose(1, 2)).transpose(1, 2)
+
+
+class TokenTCNRRHead(nn.Module):
+    """RR head that models local token patterns before mean/std pooling."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_layers: int = 2,
+        kernel_size: int = 3,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        if int(d_model) <= 0:
+            raise ValueError(f"d_model must be positive, got {d_model}")
+        if int(num_layers) <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        self.d_model = int(d_model)
+        self.num_layers = int(num_layers)
+        self.kernel_size = int(kernel_size)
+        self.blocks = nn.ModuleList(
+            [
+                TokenTCNBlock(
+                    self.d_model,
+                    kernel_size=self.kernel_size,
+                    dilation=2 ** i,
+                    dropout=float(dropout),
+                )
+                for i in range(self.num_layers)
+            ]
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(2 * self.d_model),
+            nn.Linear(2 * self.d_model, self.d_model),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(self.d_model, 1),
+        )
+
+    def forward(self, h_vit: torch.Tensor) -> torch.Tensor:
+        if h_vit.ndim != 3:
+            raise ValueError(f"Expected h_vit with shape (B,T,D), got {tuple(h_vit.shape)}")
+        if h_vit.size(-1) != self.d_model:
+            raise ValueError(f"Expected token dim {self.d_model}, got {h_vit.size(-1)}")
+        x = h_vit.transpose(1, 2).contiguous()
+        for block in self.blocks:
+            x = block(x)
+        mean = x.mean(dim=-1)
+        std = x.std(dim=-1, unbiased=False)
+        pooled = torch.cat([mean, std], dim=-1)
+        return self.head(pooled).squeeze(-1)
+
+
 class TinyIMU2PressureViT(nn.Module):
     def __init__(
         self,
@@ -258,6 +349,10 @@ class TinyIMU2PressureViT(nn.Module):
         decoder_mode: str = "gru",
         decoder_layers: int = 1,
         rr_from: str = "encoder",
+        rr_head_type: str = "mlp",
+        rr_tcn_layers: int = 2,
+        rr_tcn_kernel_size: int = 3,
+        rr_tcn_dropout: Optional[float] = None,
     ):
         super().__init__()
         self.input_channels = input_channels
@@ -297,6 +392,15 @@ class TinyIMU2PressureViT(nn.Module):
         self.rr_from = str(rr_from).lower().strip()
         if self.rr_from not in {"encoder", "decoder", "both"}:
             raise ValueError(f"rr_from must be one of encoder/decoder/both, got {rr_from!r}")
+        self.rr_head_type = str(rr_head_type).lower().strip()
+        print("rr_head_type: ", self.rr_head_type)
+        if self.rr_head_type not in {"mlp", "token_tcn"}:
+            raise ValueError(f"rr_head_type must be one of mlp/token_tcn, got {rr_head_type!r}")
+        if self.rr_head_type == "token_tcn" and self.rr_from == "both":
+            raise ValueError("rr_from='both' is not supported with rr_head_type='token_tcn'")
+        self.rr_tcn_layers = int(rr_tcn_layers)
+        self.rr_tcn_kernel_size = int(rr_tcn_kernel_size)
+        self.rr_tcn_dropout = float(dropout if rr_tcn_dropout is None else rr_tcn_dropout)
         self._last_profile_attn_metrics: Dict[str, float] = {}
 
         self.spec_proj: Optional[nn.Linear] = None
@@ -335,13 +439,21 @@ class TinyIMU2PressureViT(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_model, self.pressure_freq_bins),
         )
-        self.rr_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
+        if self.rr_head_type == "token_tcn":
+            self.rr_head = TokenTCNRRHead(
+                d_model=d_model,
+                num_layers=self.rr_tcn_layers,
+                kernel_size=self.rr_tcn_kernel_size,
+                dropout=self.rr_tcn_dropout,
+            )
+        else:
+            self.rr_head = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, 1),
+            )
         self.rr_fusion_head = nn.Sequential(
             nn.LayerNorm(2 * d_model),
             nn.Linear(2 * d_model, d_model),
@@ -626,10 +738,16 @@ class TinyIMU2PressureViT(nn.Module):
         both:    pooled encoder and decoder tokens concatenated.
         """
         if self.rr_from == "encoder":
+            if self.rr_head_type == "token_tcn":
+                return self.rr_head(h).view(-1)
             return self.rr_head(h.mean(dim=1)).squeeze(-1)
         if self.rr_from == "decoder":
+            if self.rr_head_type == "token_tcn":
+                return self.rr_head(h_dec).view(-1)
             return self.rr_head(h_dec.mean(dim=1)).squeeze(-1)
         if self.rr_from == "both":
+            if self.rr_head_type == "token_tcn":
+                raise RuntimeError("rr_from='both' is not supported with rr_head_type='token_tcn'")
             pooled = torch.cat([h.mean(dim=1), h_dec.mean(dim=1)], dim=-1)
             return self.rr_fusion_head(pooled).squeeze(-1)
         raise RuntimeError(f"Unhandled rr_from={self.rr_from!r}")
@@ -678,7 +796,7 @@ class TinyIMU2PressureViT(nn.Module):
         h_dec = self.decode_reconstruction(h_cond)
         pressure_logmag = F.softplus(self.pressure_mag_head(h_dec))
 
-        if mode == "film" and self.rr_from == "encoder":
+        if mode == "film" and self.rr_from == "encoder" and self.rr_head_type == "mlp":
             pooled = h_cond.mean(dim=1)
             pooled = self.profile_film_pooled(pooled, profile_vector)
             rr = self.rr_head(pooled).squeeze(-1)
@@ -1526,6 +1644,30 @@ def build_base_parser(default_subjects_list: List[str], default_out_dir: str) ->
         choices=["encoder", "decoder", "both"],
         help="Feature source for RR head. encoder matches the current baseline.",
     )
+    parser.add_argument(
+        "--rr-head-type",
+        default="mlp",
+        choices=["mlp", "token_tcn"],
+        help="RR readout head. mlp matches the current pooled baseline; token_tcn applies temporal convolutions over ViT tokens.",
+    )
+    parser.add_argument(
+        "--rr-tcn-layers",
+        type=int,
+        default=2,
+        help="Number of residual depthwise-separable token convolution blocks for --rr-head-type token_tcn.",
+    )
+    parser.add_argument(
+        "--rr-tcn-kernel-size",
+        type=int,
+        default=3,
+        help="Odd Conv1d kernel size over tokens for --rr-head-type token_tcn.",
+    )
+    parser.add_argument(
+        "--rr-tcn-dropout",
+        type=float,
+        default=None,
+        help="Dropout for --rr-head-type token_tcn. Defaults to the model dropout.",
+    )
     return parser
 
 
@@ -1610,6 +1752,10 @@ def run_loocv_experiment(
             decoder_mode=str(getattr(args, "decoder_mode", "gru")),
             decoder_layers=int(getattr(args, "decoder_layers", 1)),
             rr_from=str(getattr(args, "rr_from", "encoder")),
+            rr_head_type=str(getattr(args, "rr_head_type", "mlp")),
+            rr_tcn_layers=int(getattr(args, "rr_tcn_layers", 2)),
+            rr_tcn_kernel_size=int(getattr(args, "rr_tcn_kernel_size", 3)),
+            rr_tcn_dropout=getattr(args, "rr_tcn_dropout", None),
             use_profile_film=bool(getattr(args, "use_profile_film", False)),
             use_profile_qkv=bool(getattr(args, "use_profile_qkv", False)),
             profile_conditioning=profile_conditioning,

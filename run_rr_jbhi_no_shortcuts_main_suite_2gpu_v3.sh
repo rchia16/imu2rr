@@ -8,6 +8,10 @@ set -euo pipefail
 #   2. Full alpha-hat adaptation split by held-out subject across two GPUs.
 #   3. Full prototype/OOD gate adaptation split by held-out subject across two GPUs.
 #   4. Combined tables.
+# ROOT=/projects/BLVMob/imu-rr-seated/results/jbhi_no_shortcuts_2gpu_v3_20260623T031658Z \
+# SKIP_COMPLETED=1 \
+# bash run_rr_jbhi_no_shortcuts_main_suite_2gpu_v3.sh
+
 #
 # NOTE:
 #   This script intentionally calls the *_2gpu_v2 runners. It does not call the
@@ -20,6 +24,7 @@ DATA_GROUP="${DATA_GROUP:-mr}"
 DATA_STR="${DATA_STR:-imu_filt}"
 MDL_DIR="${MDL_DIR:-/projects/BLVMob/imu-rr-seated/models/imu_filt/loocv}"
 GPUS="${GPUS:-0 1}"
+SKIP_COMPLETED="${SKIP_COMPLETED:-0}"
 
 # Baseline runner settings.
 BASELINE_EPOCHS="${BASELINE_EPOCHS:-80}"
@@ -41,6 +46,7 @@ EVAL_SUBJECTS="${EVAL_SUBJECTS:-${SUBJECTS}}"
 ADAPT_EPOCHS="${ADAPT_EPOCHS:-20}"
 ADAPT_BATCH_SIZE="${ADAPT_BATCH_SIZE:-16}"
 RR_PROBE_EPOCHS="${RR_PROBE_EPOCHS:-100}"
+RR_HEAD_TYPE="${RR_HEAD_TYPE:-token_tcn}"
 
 export PYTHONUNBUFFERED=1
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
@@ -66,8 +72,9 @@ REUSE_EXISTING_ROOTS="${REUSE_EXISTING_ROOTS}" \
 REUSE_EXISTING_MODE="${REUSE_EXISTING_MODE}" \
 MODELS_GPU0="${MODELS_GPU0}" \
 MODELS_GPU1="${MODELS_GPU1}" \
-bash run_rr_jbhi_tslib_main_suite_2gpu_v3.sh \
-  2>&1 | tee "${ROOT}/logs/source_neural_baselines_2gpu.log"
+SKIP_COMPLETED="${SKIP_COMPLETED}" \
+# bash run_rr_jbhi_tslib_main_suite_2gpu_v3.sh \
+#   2>&1 | tee "${ROOT}/logs/source_neural_baselines_2gpu.log"
 
 echo "[2/4] Running full alpha-hat adaptation on two GPUs"
 OUT_DIR="${ROOT}/alpha_hat_full" \
@@ -81,6 +88,7 @@ EVAL_SUBJECTS="${EVAL_SUBJECTS}" \
 EPOCHS="${ADAPT_EPOCHS}" \
 BATCH_SIZE="${ADAPT_BATCH_SIZE}" \
 RR_PROBE_EPOCHS="${RR_PROBE_EPOCHS}" \
+SKIP_COMPLETED="${SKIP_COMPLETED}" \
 bash run_adaptation_alpha_hat_tests_full_2gpu_v2.sh \
   2>&1 | tee "${ROOT}/logs/alpha_hat_full_2gpu.log"
 
@@ -96,6 +104,8 @@ EVAL_SUBJECTS="${EVAL_SUBJECTS}" \
 EPOCHS="${ADAPT_EPOCHS}" \
 BATCH_SIZE="${ADAPT_BATCH_SIZE}" \
 RR_PROBE_EPOCHS="${RR_PROBE_EPOCHS}" \
+SKIP_COMPLETED="${SKIP_COMPLETED}" \
+RR_HEAD_TYPE="${RR_HEAD_TYPE}" \
 bash run_adaptation_prototype_gate_tests_full_2gpu_v2.sh \
   2>&1 | tee "${ROOT}/logs/prototype_gate_full_2gpu.log"
 
