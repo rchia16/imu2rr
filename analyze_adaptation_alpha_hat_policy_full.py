@@ -46,6 +46,10 @@ DEFAULT_ALPHA_GRID = {
 
 ALPHA_SUMMARY_MODES = [
     "none",
+    "feature_mean_align_alpha050",
+    "feature_mean_align_alpha075",
+    "feature_mean_align_alpha100",
+    "feature_mean_align_profile_shrink",
     "adapt_mean_alpha_050",
     "adapt_mean_alpha_075",
     "adapt_mean_alpha_100",

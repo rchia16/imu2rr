@@ -12,7 +12,23 @@ LADDER="${LADDER:-vit_pressure_crossmodal_stft_rr_adaptation_alpha_hat_sweep.py}
 SUMMARIZER="${SUMMARIZER:-summarize_rr_adaptation_alpha_hat_sweep.py}"
 POLICY="${POLICY:-analyze_adaptation_alpha_hat_policy_full.py}"
 
-TTA_MODES="${TTA_MODES:-none adapt_mean_alpha_025 adapt_mean_alpha_050 adapt_mean_alpha_075 adapt_mean_alpha_100 profile_film_init_only profile_film_unsup_sparc direct_stft_rr hybrid_probe_stft_conf}"
+EXPERIMENT_SET="${EXPERIMENT_SET:-alpha_hat}"
+case "${EXPERIMENT_SET}" in
+  alpha_hat)
+    TTA_MODES="${TTA_MODES:-none adapt_mean_alpha_025 adapt_mean_alpha_050 adapt_mean_alpha_075 adapt_mean_alpha_100 profile_film_init_only profile_film_unsup_sparc direct_stft_rr hybrid_probe_stft_conf}"
+    ALPHA_GRID_MODES="${ALPHA_GRID_MODES:-none:0 adapt_mean_alpha_025:0.25 adapt_mean_alpha_050:0.5 adapt_mean_alpha_075:0.75 adapt_mean_alpha_100:1.0}"
+    LEARN_ALPHA_FEATURE_MODE="${LEARN_ALPHA_FEATURE_MODE:-adapt_mean_alpha_100}"
+    ;;
+  feature_mean_align)
+    TTA_MODES="${TTA_MODES:-none feature_mean_align_alpha050 feature_mean_align_alpha075 feature_mean_align_alpha100 feature_mean_align_profile_shrink}"
+    ALPHA_GRID_MODES="${ALPHA_GRID_MODES:-none:0 feature_mean_align_alpha050:0.5 feature_mean_align_alpha075:0.75 feature_mean_align_alpha100:1.0}"
+    LEARN_ALPHA_FEATURE_MODE="${LEARN_ALPHA_FEATURE_MODE:-feature_mean_align_alpha100}"
+    ;;
+  *)
+    echo "[ERROR] Unknown EXPERIMENT_SET=${EXPERIMENT_SET}" >&2
+    exit 2
+    ;;
+esac
 
 export PYTHONUNBUFFERED=1
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
@@ -61,9 +77,9 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   --candidates "${TTA_MODES}" \
   --strict-no-label \
   --learn-alpha-policy \
-  --alpha-grid-modes "none:0 adapt_mean_alpha_025:0.25 adapt_mean_alpha_050:0.5 adapt_mean_alpha_075:0.75 adapt_mean_alpha_100:1.0" \
+  --alpha-grid-modes "${ALPHA_GRID_MODES}" \
   --alpha-target-method quadratic_safe \
-  --learn-alpha-feature-mode adapt_mean_alpha_100 \
+  --learn-alpha-feature-mode "${LEARN_ALPHA_FEATURE_MODE}" \
   --learn-alpha-film-source-mode profile_film_init_only \
   --learn-alpha-film-residual-lambda 0.25 \
   2>&1 | tee "${OUT_DIR}/logs/alpha_hat_policy_${STAMP}.log"

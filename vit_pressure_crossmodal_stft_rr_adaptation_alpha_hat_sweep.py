@@ -1200,6 +1200,11 @@ def apply_rrbin_moment_alignment(z: np.ndarray, pred: np.ndarray, stats: RRBinMo
 # Externally, these are adaptation modes. The legacy feature_* names are kept
 # as aliases so previous alignment sweeps remain reproducible.
 FEATURE_ADAPTATION_MODES = {
+    # Conservative test-time feature-mean alignment before the frozen RR readout.
+    "feature_mean_align_alpha050",
+    "feature_mean_align_alpha075",
+    "feature_mean_align_alpha100",
+    "feature_mean_align_profile_shrink",
     # New focused tests.
     "adapt_mean_alpha_000",
     "adapt_mean_alpha_025",
@@ -1215,6 +1220,13 @@ FEATURE_ADAPTATION_MODES = {
     "feature_rrbin_diag_align",
 }
 FEATURE_ALIGNMENT_MODES = FEATURE_ADAPTATION_MODES
+
+FEATURE_MEAN_ALIGNMENT_MODES = {
+    "feature_mean_align_alpha050",
+    "feature_mean_align_alpha075",
+    "feature_mean_align_alpha100",
+    "feature_mean_align_profile_shrink",
+}
 
 
 def _finite_rows(z: np.ndarray) -> np.ndarray:
@@ -1232,6 +1244,156 @@ def _feature_moments(z: np.ndarray, eps: float = 1e-6) -> Tuple[np.ndarray, np.n
         return np.zeros(d, dtype=np.float32), np.ones(d, dtype=np.float32)
     zz = z[keep]
     return zz.mean(axis=0).astype(np.float32), (zz.std(axis=0) + float(eps)).astype(np.float32)
+
+
+def compute_feature_mean_alignment_stats(
+    z_source: np.ndarray,
+    z_target: np.ndarray,
+    eps: float = 1e-6,
+) -> Dict[str, object]:
+    """Compute no-label target-to-source feature mean alignment statistics."""
+    z_source = np.asarray(z_source, dtype=np.float32)
+    z_target = np.asarray(z_target, dtype=np.float32)
+    if z_source.ndim != 2:
+        raise ValueError(f"Expected z_source to be 2D, got shape={z_source.shape}")
+    if z_target.ndim != 2:
+        raise ValueError(f"Expected z_target to be 2D, got shape={z_target.shape}")
+    if z_source.shape[1] != z_target.shape[1]:
+        raise ValueError(
+            f"Feature dimension mismatch for alignment: source={z_source.shape[1]} target={z_target.shape[1]}"
+        )
+    src_keep = _finite_rows(z_source)
+    tgt_keep = _finite_rows(z_target)
+    if not np.any(src_keep):
+        raise ValueError("No finite source rows available for feature mean alignment.")
+    if not np.any(tgt_keep):
+        raise ValueError("No finite target rows available for feature mean alignment.")
+
+    source_mean = z_source[src_keep].mean(axis=0).astype(np.float32)
+    target_mean = z_target[tgt_keep].mean(axis=0).astype(np.float32)
+    source_std = (z_source[src_keep].std(axis=0) + float(eps)).astype(np.float32)
+    target_std = (z_target[tgt_keep].std(axis=0) + float(eps)).astype(np.float32)
+    delta = (source_mean - target_mean).astype(np.float32)
+    dim = max(1, int(source_mean.size))
+    mean_shift_norm = float(np.linalg.norm(target_mean - source_mean) / np.sqrt(dim))
+    var_shift_norm = float(np.linalg.norm(target_std - source_std) / np.sqrt(dim))
+    source_scale = float(np.mean(source_std) + float(eps))
+    normalized_mean_shift = float(mean_shift_norm / source_scale)
+    normalized_var_shift = float(var_shift_norm / source_scale)
+    return {
+        "source_mean": source_mean,
+        "target_mean": target_mean,
+        "source_std": source_std,
+        "target_std": target_std,
+        "delta": delta,
+        "mean_shift_norm": mean_shift_norm,
+        "var_shift_norm": var_shift_norm,
+        "normalized_mean_shift": normalized_mean_shift,
+        "normalized_var_shift": normalized_var_shift,
+        "source_n": int(src_keep.sum()),
+        "target_n": int(tgt_keep.sum()),
+        "feature_dim": int(source_mean.size),
+    }
+
+
+def resolve_feature_alignment_alpha(
+    mode: str,
+    stats: Dict[str, object],
+    max_alpha: float = 0.75,
+    eps: float = 1e-6,
+) -> float:
+    mode = str(mode).lower()
+    lookup = {
+        "none": 0.0,
+        "feature_mean_align_alpha050": 0.50,
+        "feature_mean_align_alpha075": 0.75,
+        "feature_mean_align_alpha100": 1.00,
+    }
+    if mode in lookup:
+        return float(lookup[mode])
+    if mode == "feature_mean_align_profile_shrink":
+        mean_shift = float(stats.get("normalized_mean_shift", 0.0))
+        var_shift = float(stats.get("normalized_var_shift", 0.0))
+        alpha_raw = mean_shift / (mean_shift + var_shift + float(eps))
+        return float(np.clip(alpha_raw, 0.0, float(max_alpha)))
+    raise ValueError(f"Unsupported feature mean alignment mode={mode!r}")
+
+
+def apply_feature_mean_alignment(
+    z: np.ndarray,
+    stats: Dict[str, object],
+    alpha: float,
+) -> np.ndarray:
+    delta = np.asarray(stats["delta"], dtype=np.float32).reshape(1, -1)
+    return (np.asarray(z, dtype=np.float32) + float(alpha) * delta).astype(np.float32)
+
+
+def _feature_alignment_stats_diagnostics(
+    *,
+    mode: str,
+    stats: Dict[str, object],
+    alpha: float,
+    target_source: str,
+) -> Dict[str, object]:
+    delta = np.asarray(stats.get("delta", np.zeros(0, dtype=np.float32)), dtype=np.float32).reshape(-1)
+    return {
+        "feature_align_mode": str(mode).lower(),
+        "feature_align_alpha": float(alpha),
+        "feature_align_mean_shift_norm": float(stats.get("mean_shift_norm", float("nan"))),
+        "feature_align_var_shift_norm": float(stats.get("var_shift_norm", float("nan"))),
+        "feature_align_normalized_mean_shift": float(stats.get("normalized_mean_shift", float("nan"))),
+        "feature_align_normalized_var_shift": float(stats.get("normalized_var_shift", float("nan"))),
+        "feature_align_delta_norm": float(np.linalg.norm(delta)) if delta.size else float("nan"),
+        "feature_align_source_n": int(stats.get("source_n", 0)),
+        "feature_align_target_n": int(stats.get("target_n", 0)),
+        "feature_align_feature_dim": int(stats.get("feature_dim", delta.size)),
+        "feature_align_target_source": str(target_source),
+    }
+
+
+def _attach_feature_alignment_metric_aliases(metrics: Dict[str, object], mode: str) -> None:
+    if "feature_align_mode" not in metrics:
+        metrics["feature_align_mode"] = str(mode).lower()
+    if "feature_align_alpha" not in metrics:
+        metrics["feature_align_alpha"] = 0.0 if str(mode).lower() == "none" else float("nan")
+    for key in (
+        "feature_align_mean_shift_norm",
+        "feature_align_var_shift_norm",
+        "feature_align_normalized_mean_shift",
+        "feature_align_normalized_var_shift",
+        "feature_align_delta_norm",
+    ):
+        metrics.setdefault(key, float("nan"))
+    for key in ("feature_align_source_n", "feature_align_target_n", "feature_align_feature_dim"):
+        metrics.setdefault(key, 0)
+    metrics.setdefault("feature_align_target_source", "")
+
+    pre_mae = float(metrics.get("rr_probe_pre_mae", float("nan")))
+    post_mae = float(metrics.get("rr_probe_post_mae", float("nan")))
+    pre_corr = float(metrics.get("rr_probe_pre_corr", float("nan")))
+    post_corr = float(metrics.get("rr_probe_post_corr", float("nan")))
+    metrics["feature_align_pre_mae"] = pre_mae
+    metrics["feature_align_post_mae"] = post_mae
+    metrics["feature_align_delta_mae_vs_none"] = (
+        float(post_mae - pre_mae) if np.isfinite(pre_mae) and np.isfinite(post_mae) else float("nan")
+    )
+    metrics["feature_align_pre_corr"] = pre_corr
+    metrics["feature_align_post_corr"] = post_corr
+    metrics["feature_align_delta_corr_vs_none"] = (
+        float(post_corr - pre_corr) if np.isfinite(pre_corr) and np.isfinite(post_corr) else float("nan")
+    )
+
+
+def _feature_alignment_use_calibration_only(args) -> bool:
+    feature_flag = getattr(args, "feature_align_use_calibration_only", None)
+    adapt_flag = getattr(args, "adaptation_use_calibration_only", None)
+    if feature_flag is False or adapt_flag is False:
+        return False
+    if adapt_flag is not None:
+        return bool(adapt_flag)
+    if feature_flag is not None:
+        return bool(feature_flag)
+    return True
 
 
 def _align_mean(z: np.ndarray, src_mean: np.ndarray, tgt_mean: np.ndarray) -> np.ndarray:
@@ -1262,6 +1424,9 @@ def _align_mean_shrink(
 
 def _alpha_from_adaptation_mode(mode: str) -> Optional[float]:
     lookup = {
+        "feature_mean_align_alpha050": 0.50,
+        "feature_mean_align_alpha075": 0.75,
+        "feature_mean_align_alpha100": 1.00,
         "adapt_mean_alpha_000": 0.0,
         "adapt_mean_alpha_025": 0.25,
         "adapt_mean_alpha_050": 0.50,
@@ -1432,8 +1597,11 @@ def _feature_delta_diagnostics(
         return {f"{prefix}_feature_delta_n": 0.0}
     dz = z_after[:n, :d] - z_before[:n, :d]
     dz_norm = np.linalg.norm(dz, axis=1)
+    dz_rms = float(np.sqrt(np.mean(dz * dz))) if dz.size else 0.0
     out: Dict[str, float] = {
         f"{prefix}_feature_delta_n": float(n),
+        f"{prefix}_feature_delta_rms": dz_rms,
+        f"{prefix}_hidden_delta_rms": dz_rms,
         f"{prefix}_feature_delta_norm_mean": float(np.mean(dz_norm)),
         f"{prefix}_feature_delta_norm_p95": float(np.percentile(dz_norm, 95)),
     }
@@ -1472,11 +1640,10 @@ def apply_feature_alignment_mode(
     src_mean, src_std = _feature_moments(z_source, eps)
     tgt_mean, tgt_std = _feature_moments(z_target_moments, eps)
     mode = str(mode).lower()
-    use_cal_only = bool(
-        getattr(args, "adaptation_use_calibration_only", getattr(args, "feature_align_use_calibration_only", True))
-    )
+    use_cal_only = _feature_alignment_use_calibration_only(args)
     feature_mean_shift_rms = float(np.linalg.norm(src_mean - tgt_mean) / np.sqrt(max(1, src_mean.size))) if src_mean.size else float("nan")
     diag_log_std_ratio_abs_mean = float(np.mean(np.abs(np.log((tgt_std + eps) / (src_std + eps))))) if src_std.size else float("nan")
+    mean_align_stats = compute_feature_mean_alignment_stats(z_source, z_target_moments, eps=eps)
     extra: Dict[str, float] = {
         "feature_align_mode": mode,
         "feature_align_n_source_windows": int(z_source.shape[0]),
@@ -1495,7 +1662,14 @@ def apply_feature_alignment_mode(
         "feature_adapt_diag_log_std_ratio_abs_mean": diag_log_std_ratio_abs_mean,
     }
     alpha = _alpha_from_adaptation_mode(mode)
-    if mode == "adapt_mean_profile_shrink":
+    if mode == "feature_mean_align_profile_shrink":
+        alpha = resolve_feature_alignment_alpha(
+            mode,
+            mean_align_stats,
+            max_alpha=float(getattr(args, "feature_align_profile_shrink_max_alpha", 0.75)),
+            eps=eps,
+        )
+    elif mode == "adapt_mean_profile_shrink":
         alpha = _profile_shrink_alpha(
             feature_mean_shift_rms=feature_mean_shift_rms,
             diag_log_std_ratio_abs_mean=diag_log_std_ratio_abs_mean,
@@ -1503,14 +1677,29 @@ def apply_feature_alignment_mode(
             args=args,
         )
     if alpha is not None:
-        z_aligned = _align_mean_shrink(z_eval, src_mean, tgt_mean, alpha)
+        if mode in FEATURE_MEAN_ALIGNMENT_MODES:
+            z_aligned = apply_feature_mean_alignment(z_eval, mean_align_stats, alpha)
+        else:
+            z_aligned = _align_mean_shrink(z_eval, src_mean, tgt_mean, alpha)
         extra["feature_align_kind"] = "mean_shrink"
         extra["feature_align_alpha"] = float(alpha)
         extra["feature_adapt_kind"] = "mean_shrink"
         extra["feature_adapt_alpha"] = float(alpha)
+        extra.update(_feature_alignment_stats_diagnostics(
+            mode=mode,
+            stats=mean_align_stats,
+            alpha=float(alpha),
+            target_source=str(getattr(args, "_feature_align_target_source", "unknown-unlabeled")),
+        ))
     elif mode == "feature_diag_align":
         z_aligned = _align_diag(z_eval, src_mean, src_std, tgt_mean, tgt_std)
         extra["feature_align_kind"] = "diag"
+        extra.update(_feature_alignment_stats_diagnostics(
+            mode=mode,
+            stats=mean_align_stats,
+            alpha=1.0,
+            target_source=str(getattr(args, "_feature_align_target_source", "unknown-unlabeled")),
+        ))
     elif mode == "feature_rr_orthogonal_align":
         z_aligned, rr_extra = _apply_rr_orthogonal_diag_alignment(
             z_eval, z_source, z_target_moments, rr_model, eps
@@ -1599,6 +1788,42 @@ def rr_structured_adaptation_evaluate(
 
     if mode == "none":
         pred_post = pred_pre
+        try:
+            z_source_none = predict_features(rr_model, x_source, device)
+            use_cal_only = _feature_alignment_use_calibration_only(args)
+            if use_cal_only and x_cal.shape[0]:
+                z_target_none = predict_features(rr_model, x_cal, device)
+                target_source = "calibration-unlabeled"
+            else:
+                z_target_none = predict_features(rr_model, x_target, device)
+                target_source = "all-target-unlabeled"
+            if z_target_none.shape[0] == 0:
+                z_target_none = predict_features(rr_model, x_eval, device)
+                target_source = "transductive-unlabeled"
+            stats_none = compute_feature_mean_alignment_stats(
+                z_source_none,
+                z_target_none,
+                eps=float(getattr(args, "feature_align_diag_eps", 1e-6)),
+            )
+            extra.update(_feature_alignment_stats_diagnostics(
+                mode="none",
+                stats=stats_none,
+                alpha=0.0,
+                target_source=target_source,
+            ))
+            extra.update({
+                "feature_align_kind": "none",
+                "feature_align_eval_feature_delta_rms": 0.0,
+                "feature_align_eval_hidden_delta_rms": 0.0,
+                "feature_align_eval_feature_delta_norm_mean": 0.0,
+                "feature_align_eval_feature_delta_norm_p95": 0.0,
+            })
+        except Exception as exc:
+            extra.update({
+                "feature_align_mode": "none",
+                "feature_align_alpha": 0.0,
+                "feature_align_stats_error": str(exc),
+            })
 
     elif mode == "affine_cal":
         cal, extra = fit_affine_calibration(
@@ -1693,9 +1918,8 @@ def rr_structured_adaptation_evaluate(
         z_source = predict_features(rr_model, x_source, device)
         z_eval = predict_features(rr_model, x_eval, device)
         z_cal = predict_features(rr_model, x_cal, device) if x_cal.shape[0] else np.zeros((0, x_source.shape[1]), dtype=np.float32)
-        use_cal_only = bool(
-            getattr(args, "adaptation_use_calibration_only", getattr(args, "feature_align_use_calibration_only", True))
-        )
+        use_cal_only = _feature_alignment_use_calibration_only(args)
+        target_source = "calibration-unlabeled"
         if use_cal_only:
             z_mom = z_cal
             pred_mom = pred_cal
@@ -1704,10 +1928,12 @@ def rr_structured_adaptation_evaluate(
             z_mom = predict_features(rr_model, x_target, device)
             pred_mom = pred_target
             profile_windows = ctx.target_windows
+            target_source = "all-target-unlabeled"
         if z_mom.shape[0] == 0:
             z_mom = z_eval
             pred_mom = pred_pre
             profile_windows = ctx.eval_windows
+            target_source = "transductive-unlabeled"
 
         profile_rms_z = None
         profile_max_abs_z = None
@@ -1727,6 +1953,7 @@ def rr_structured_adaptation_evaluate(
             profile_rms_z = None
             profile_max_abs_z = None
 
+        setattr(args, "_feature_align_target_source", target_source)
         z_eval_aligned, extra = apply_feature_alignment_mode(
             mode=mode,
             z_source=z_source,
@@ -1739,6 +1966,7 @@ def rr_structured_adaptation_evaluate(
             args=args,
             profile_rms_z=profile_rms_z,
         )
+        extra["feature_align_target_source"] = target_source
         extra["feature_adapt_profile_max_abs_z"] = float(profile_max_abs_z) if profile_max_abs_z is not None and np.isfinite(profile_max_abs_z) else float("nan")
         pred_post = _linear_predict_from_features(rr_model, z_eval_aligned, device)
         extra.update(_prediction_shift_diagnostics(
@@ -1883,6 +2111,7 @@ def rr_structured_adaptation_evaluate(
 
     metrics.update(rr_metrics(y_eval, pred_post, prefix="rr_probe_post"))
     metrics.update(extra)
+    _attach_feature_alignment_metric_aliases(metrics, mode)
     metrics.update({
         "rr_tta_mode": mode,
         "rr_probe_n_source": int(x_source.shape[0]),
@@ -4560,6 +4789,10 @@ def feature_adaptive_hook(model, sbj: str, train_loader, test_loader, device: st
 
 DEFAULT_SWEEP_MODES = [
     "none",
+    "feature_mean_align_alpha075",
+    "feature_mean_align_alpha050",
+    "feature_mean_align_alpha100",
+    "feature_mean_align_profile_shrink",
     "adapt_mean_alpha_050",
     "adapt_mean_alpha_100",
     "adapt_mean_profile_shrink",
@@ -4731,6 +4964,10 @@ def add_common_adaptation_args(parser) -> None:
             "ridge_residual_cal",
             "rrbin_centroid_cal",
             "rrbin_ssa",
+            "feature_mean_align_alpha050",
+            "feature_mean_align_alpha075",
+            "feature_mean_align_alpha100",
+            "feature_mean_align_profile_shrink",
             "adapt_mean_alpha_000",
             "adapt_mean_alpha_025",
             "adapt_mean_alpha_050",
@@ -4971,6 +5208,7 @@ def add_common_adaptation_args(parser) -> None:
     parser.add_argument("--feature-align-min-bin-count", type=int, default=4)
     parser.add_argument("--feature-align-shrink", type=float, default=8.0)
     parser.add_argument("--feature-align-diag-eps", type=float, default=1e-6)
+    parser.add_argument("--feature-align-profile-shrink-max-alpha", type=float, default=0.75)
 
     # Renamed adaptation options. The feature-align flags above remain as aliases.
     parser.add_argument("--adaptation-use-calibration-only", action="store_true", default=True)
