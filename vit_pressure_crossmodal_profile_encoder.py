@@ -511,15 +511,22 @@ def run_phase6_profile_encoder_cli(argv: Optional[Sequence[str]] = None) -> None
     requested_modes = _parse_modes(args.rr_tta_modes)
     if str(getattr(args, "rr_tta", "none")) in PROFILE_VECTOR_UNSUP_MODES:
         requested_modes.append(str(args.rr_tta))
-    has_profile_film_mode = any("profile_film_" in str(m) for m in requested_modes)
-    has_profile_qkv_mode = any("profile_qkv_" in str(m) for m in requested_modes)
-    if has_profile_film_mode and has_profile_qkv_mode:
+    has_profile_film_mode = any("profile_film_" in str(m) or "profile_film_clsa_qkv" in str(m) for m in requested_modes)
+    has_profile_qkv_mode = any("profile_qkv_" in str(m) or "clsa_qkv" in str(m) for m in requested_modes)
+    has_shared_profile_qkv_mode = any("film_qkv" in str(m) or "profile_film_clsa_qkv" in str(m) for m in requested_modes)
+    has_clsa_qkv_mode = any("clsa_qkv" in str(m) for m in requested_modes)
+    if has_profile_film_mode and has_profile_qkv_mode and not has_shared_profile_qkv_mode:
         raise SystemExit(
             "FiLM and QKV profile modes must be run in separate jobs because the source checkpoint "
             "trains only one profile-conditioning family at a time."
         )
     if any(str(m) in PROFILE_VECTOR_UNSUP_MODES for m in requested_modes):
-        if has_profile_qkv_mode:
+        if has_shared_profile_qkv_mode:
+            args.use_profile_film = True
+            args.use_profile_qkv = True
+            args.shared_profile_qkv = True
+            args.profile_conditioning = "film_qkv"
+        elif has_profile_qkv_mode:
             args.use_profile_qkv = True
             args.profile_conditioning = "qkv"
         else:
@@ -528,6 +535,16 @@ def run_phase6_profile_encoder_cli(argv: Optional[Sequence[str]] = None) -> None
                 args.profile_conditioning = "film"
         if int(getattr(args, "profile_stats_dim", 0)) <= 0:
             args.profile_stats_dim = profile_stats_dim(int(args.d_model))
+    if has_shared_profile_qkv_mode:
+        args.use_tcn_token_mixer = True
+        args.tcn_mixer_alpha = float(getattr(args, "tcn_mixer_alpha", 0.05))
+        args.profile_qkv_layers = "last1"
+        args.profile_qkv_scale = 0.01
+        args.profile_qkv_residual = True
+    if has_clsa_qkv_mode:
+        args.profile_qkv_mode = "clsa"
+        args.profile_clsa_scale = float(getattr(args, "profile_clsa_scale", 0.01))
+        args.profile_clsa_eta_max = float(getattr(args, "profile_clsa_eta_max", 0.1))
 
     valid_modes = set(parser._option_string_actions["--rr-tta"].choices)
     bad = [m for m in _parse_modes(args.rr_tta_modes) if m not in valid_modes]

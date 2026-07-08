@@ -293,6 +293,264 @@ UNSUP_MODE_DEFAULTS = {
         "unsup_attention_profile_weight": 0.005,
         "unsup_feature_lr": 3e-4,
     },
+    "tcn_profile_film_qkv_last1_0p01": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 0,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+    },
+    "tcn_profile_film_qkv_last1_0p01_sparc_pt": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.05,
+        "unsup_aux_consistency_weight": 0.02,
+        "unsup_smoothness_weight": 0.01,
+        "unsup_source_anchor_weight": 0.05,
+        "unsup_target_drift_weight": 0.05,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.01,
+        "qkv_delta_budget_weight": 0.01,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_qkv_last1_0p01_sparc_pt_budget": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.05,
+        "unsup_aux_consistency_weight": 0.02,
+        "unsup_smoothness_weight": 0.01,
+        "unsup_source_anchor_weight": 0.05,
+        "unsup_target_drift_weight": 0.05,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.01,
+        "qkv_delta_budget_weight": 0.01,
+        "profile_safety_budget": 1,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_qkv_last1_0p01_pt_no_stft": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "unsup_aux_consistency_weight": 0.02,
+        "unsup_smoothness_weight": 0.01,
+        "unsup_source_anchor_weight": 0.05,
+        "unsup_target_drift_weight": 0.05,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.01,
+        "qkv_delta_budget_weight": 0.01,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_qkv_last1_0p01_pt_aux_only": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "unsup_aux_consistency_weight": 0.05,
+        "unsup_smoothness_weight": 0.0,
+        "unsup_source_anchor_weight": 0.0,
+        "unsup_target_drift_weight": 0.01,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.005,
+        "qkv_delta_budget_weight": 0.01,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_qkv_last1_0p01_pt_reg_only": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "unsup_aux_consistency_weight": 0.0,
+        "unsup_smoothness_weight": 0.01,
+        "unsup_source_anchor_weight": 0.05,
+        "unsup_target_drift_weight": 0.05,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.0,
+        "qkv_delta_budget_weight": 0.01,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_qkv_last1_0p01_pt_no_stft_budget": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "adapt_profile_vector": 1,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "unsup_aux_consistency_weight": 0.02,
+        "unsup_smoothness_weight": 0.01,
+        "unsup_source_anchor_weight": 0.05,
+        "unsup_target_drift_weight": 0.05,
+        "unsup_profile_prior_weight": 0.01,
+        "unsup_rr_range_weight": 0.01,
+        "qkv_delta_budget_weight": 0.01,
+        "profile_safety_budget": 1,
+        "profile_safety_budget_use_stft_confidence": 0,
+        "unsup_feature_lr": 3e-4,
+    },
+    "tcn_profile_film_clsa_qkv_last1": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_mode": "clsa",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "profile_clsa_rank": 8,
+        "profile_clsa_scale": 0.01,
+        "profile_clsa_eta_max": 0.1,
+        "profile_clsa_enable_fast_update": 1,
+        "profile_clsa_gate_init_bias": -2.0,
+        "profile_clsa_loss_weight": 0.0,
+        "adapt_profile_vector": 0,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "uses_stft_pseudotarget_for_tta": 0,
+    },
+    "tcn_profile_film_clsa_qkv_last1_no_fast_update": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_mode": "clsa",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "profile_clsa_rank": 8,
+        "profile_clsa_scale": 0.01,
+        "profile_clsa_eta_max": 0.1,
+        "profile_clsa_enable_fast_update": 0,
+        "profile_clsa_gate_init_bias": -2.0,
+        "profile_clsa_loss_weight": 0.0,
+        "adapt_profile_vector": 0,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "uses_stft_pseudotarget_for_tta": 0,
+    },
+    "tcn_clsa_qkv_last1_no_film": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 0,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 0,
+        "profile_conditioning": "qkv",
+        "profile_qkv_mode": "clsa",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "profile_clsa_rank": 8,
+        "profile_clsa_scale": 0.01,
+        "profile_clsa_eta_max": 0.1,
+        "profile_clsa_enable_fast_update": 1,
+        "profile_clsa_gate_init_bias": -2.0,
+        "profile_clsa_loss_weight": 0.0,
+        "adapt_profile_vector": 0,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "uses_stft_pseudotarget_for_tta": 0,
+    },
+    "tcn_profile_film_clsa_qkv_last1_rank4": {
+        "use_tcn_token_mixer": 1,
+        "tcn_mixer_alpha": 0.05,
+        "use_profile_film": 1,
+        "use_profile_qkv": 1,
+        "shared_profile_qkv": 1,
+        "profile_conditioning": "film_qkv",
+        "profile_qkv_mode": "clsa",
+        "profile_qkv_layers": "last1",
+        "profile_qkv_scale": 0.01,
+        "profile_qkv_residual": 1,
+        "profile_clsa_rank": 4,
+        "profile_clsa_scale": 0.01,
+        "profile_clsa_eta_max": 0.1,
+        "profile_clsa_enable_fast_update": 1,
+        "profile_clsa_gate_init_bias": -2.0,
+        "profile_clsa_loss_weight": 0.0,
+        "adapt_profile_vector": 0,
+        "adapt_profile_encoder": 0,
+        "adapt_profile_film": 0,
+        "unsup_readout_affine": 0,
+        "unsup_stft_consistency_weight": 0.0,
+        "uses_stft_pseudotarget_for_tta": 0,
+    },
 }
 
 
@@ -1720,6 +1978,17 @@ PROFILE_VECTOR_UNSUP_MODES = {
     "profile_qkv_unsup_stft_consistency",
     "profile_qkv_unsup_stft_smooth_anchor",
     "profile_qkv_unsup_stft_smooth_prior_attn",
+    "tcn_profile_film_qkv_last1_0p01",
+    "tcn_profile_film_qkv_last1_0p01_sparc_pt",
+    "tcn_profile_film_qkv_last1_0p01_sparc_pt_budget",
+    "tcn_profile_film_qkv_last1_0p01_pt_no_stft",
+    "tcn_profile_film_qkv_last1_0p01_pt_aux_only",
+    "tcn_profile_film_qkv_last1_0p01_pt_reg_only",
+    "tcn_profile_film_qkv_last1_0p01_pt_no_stft_budget",
+    "tcn_profile_film_clsa_qkv_last1",
+    "tcn_profile_film_clsa_qkv_last1_no_fast_update",
+    "tcn_clsa_qkv_last1_no_film",
+    "tcn_profile_film_clsa_qkv_last1_rank4",
 }
 
 READOUT_ABLATION_MODES = {
@@ -2446,6 +2715,29 @@ def _get_profile_attention_metrics(model: nn.Module) -> Dict[str, float]:
     return {str(k): float(v) for k, v in metrics.items()}
 
 
+def _profile_clsa_config_diagnostics(model: nn.Module, args) -> Dict[str, float]:
+    mode = str(getattr(model, "profile_qkv_mode", getattr(args, "profile_qkv_mode", "static")))
+    return {
+        "profile_clsa_enabled": int(mode == "clsa" and bool(getattr(model, "use_profile_qkv", False))),
+        "profile_qkv_mode": mode,
+        "profile_clsa_rank": int(getattr(model, "profile_clsa_rank", getattr(args, "profile_clsa_rank", 8))),
+        "profile_clsa_scale": float(getattr(model, "profile_clsa_scale", getattr(args, "profile_clsa_scale", 0.01))),
+        "profile_clsa_enable_fast_update": int(bool(getattr(model, "profile_clsa_enable_fast_update", getattr(args, "profile_clsa_enable_fast_update", 1)))),
+    }
+
+
+def _profile_clsa_metric_diagnostics(metric_rows: List[Dict[str, float]]) -> Dict[str, float]:
+    merged = _merge_attention_metric_lists(metric_rows)
+    out: Dict[str, float] = {}
+    suffix = "_layer_"
+    for key, value in merged.items():
+        if key.startswith("profile_clsa_") and suffix in key:
+            out[key.split(suffix, 1)[0]] = float(value)
+    if "profile_clsa_loss" in out:
+        out["profile_clsa_loss_mean"] = float(out["profile_clsa_loss"])
+    return out
+
+
 def _merge_attention_metric_lists(metric_lists: List[Dict[str, float]]) -> Dict[str, float]:
     if not metric_lists:
         return {}
@@ -2460,7 +2752,9 @@ def _merge_attention_metric_lists(metric_lists: List[Dict[str, float]]) -> Dict[
 
 def _profile_conditioning_mode_for_rr_mode(mode: str) -> str:
     text = str(mode).lower().strip()
-    if "profile_qkv_" in text:
+    if "film_qkv" in text or "profile_film_clsa_qkv" in text:
+        return "film_qkv"
+    if "profile_qkv_" in text or "clsa_qkv" in text:
         return "qkv"
     return "film"
 
@@ -2684,7 +2978,12 @@ def _bool_float(x: bool) -> float:
 
 def _profile_mode_init_only(mode: str) -> bool:
     mode = str(mode).lower()
-    return mode in {"profile_film_init_only", "profile_film_gated_init_only", "profile_film_oracle_init_only"}
+    return mode in {
+        "profile_film_init_only",
+        "profile_film_gated_init_only",
+        "profile_film_oracle_init_only",
+        "tcn_profile_film_qkv_last1_0p01",
+    }
 
 
 def _profile_mode_gated(mode: str) -> bool:
@@ -2825,12 +3124,16 @@ def _profile_init_extra(
         p0,
         args,
     )
+    adapter_diag = _profile_adapter_delta_diagnostics(model, p0)
     return {
         **diag,
+        **adapter_diag,
+        **_profile_clsa_config_diagnostics(model, args),
         "feature_tta_mode": str(mode),
         "unsup_feature_tta_epochs": 0,
         "unsup_feature_tta_lr": 0.0,
         "unsup_stft_consistency_weight": 0.0,
+        "uses_stft_pseudotarget_for_tta": 0,
         "unsup_smoothness_weight": 0.0,
         "unsup_source_anchor_weight": 0.0,
         "unsup_target_drift_weight": 0.0,
@@ -2843,9 +3146,15 @@ def _profile_init_extra(
         "readout_affine_b": 0.0,
         "profile_delta_norm": 0.0,
         "profile_film_scale": float(getattr(model, "profile_film_scale", getattr(args, "profile_film_scale", 0.1))),
+        "profile_film_placement": str(getattr(model, "profile_film_placement", getattr(args, "profile_film_placement", "token_pooled"))),
+        "profile_film_residual_alpha": float(getattr(model, "profile_film_residual_alpha", getattr(args, "profile_film_residual_alpha", 0.1))),
         "profile_qkv_scale": float(getattr(model, "profile_qkv_scale", getattr(args, "profile_qkv_scale", 0.1))),
         "profile_qkv_layers_used": str(getattr(model, "profile_qkv_layers", getattr(args, "profile_qkv_layers", "last1"))),
+        "profile_qkv_residual": int(bool(getattr(model, "profile_qkv_residual", getattr(args, "profile_qkv_residual", False)))),
         "profile_conditioning_mode": str(getattr(model, "profile_conditioning", "none")),
+        "profile_safety_budget_use_stft_confidence": int(bool(getattr(args, "profile_safety_budget_use_stft_confidence", True))),
+        "profile_unsup_episodic_batch": int(bool(getattr(args, "profile_unsup_episodic_batch", False))),
+        "profile_unsup_episodic_batches": 0,
         "profile_adapted_vector": 0,
         "profile_adapted_encoder": 0,
         "profile_adapted_film": 0,
@@ -2859,6 +3168,91 @@ def _profile_init_extra(
         "feature_trainable_pressure_decoder_params": 0,
         "feature_trainable_names_json": json.dumps([]),
     }
+
+
+def _qkv_delta_norm_tensor(model: nn.Module, profile_vector: torch.Tensor) -> torch.Tensor:
+    conditioners = getattr(model, "profile_qkv_conditioners", None)
+    if conditioners is None or len(conditioners) == 0:
+        return profile_vector.new_tensor(0.0)
+    vals = []
+    scale = float(getattr(model, "profile_qkv_scale", 0.0))
+    for conditioner in conditioners.values():
+        cq, ck, cv = conditioner(profile_vector)
+        delta = torch.cat([cq, ck, cv], dim=-1) * scale
+        vals.append(delta.float().norm(p=2, dim=-1))
+    if not vals:
+        return profile_vector.new_tensor(0.0)
+    return torch.stack(vals, dim=0).mean()
+
+
+@torch.no_grad()
+def _profile_adapter_delta_diagnostics(model: nn.Module, profile_vector: torch.Tensor) -> Dict[str, float]:
+    profile_vector = profile_vector.detach()
+    out = {
+        "profile_final_norm": float(profile_vector.float().norm(p=2).cpu()),
+        "qkv_delta_norm_mean": 0.0,
+        "qkv_delta_norm_p95": 0.0,
+        "film_delta_norm_mean": 0.0,
+        "film_delta_norm_p95": 0.0,
+    }
+    conditioners = getattr(model, "profile_qkv_conditioners", None)
+    if conditioners is not None and len(conditioners) > 0:
+        vals = []
+        scale = float(getattr(model, "profile_qkv_scale", 0.0))
+        for conditioner in conditioners.values():
+            cq, ck, cv = conditioner(profile_vector)
+            delta = torch.cat([cq, ck, cv], dim=-1) * scale
+            vals.extend(delta.float().norm(p=2, dim=-1).detach().cpu().numpy().reshape(-1).tolist())
+        if vals:
+            arr = np.asarray(vals, dtype=np.float32)
+            out["qkv_delta_norm_mean"] = float(np.mean(arr))
+            out["qkv_delta_norm_p95"] = float(np.percentile(arr, 95))
+
+    film_vals = []
+    for attr in ("profile_film_tokens", "profile_film_pooled"):
+        film = getattr(model, attr, None)
+        linear = getattr(film, "to_gamma_beta", None)
+        if linear is None:
+            continue
+        gb = linear(profile_vector)
+        gamma_raw, beta_raw = gb.chunk(2, dim=-1)
+        scale = float(getattr(film, "scale", getattr(model, "profile_film_scale", 0.0)))
+        delta = torch.cat([scale * torch.tanh(gamma_raw), scale * torch.tanh(beta_raw)], dim=-1)
+        film_vals.extend(delta.float().norm(p=2, dim=-1).detach().cpu().numpy().reshape(-1).tolist())
+    if film_vals:
+        arr = np.asarray(film_vals, dtype=np.float32)
+        out["film_delta_norm_mean"] = float(np.mean(arr))
+        out["film_delta_norm_p95"] = float(np.percentile(arr, 95))
+    return out
+
+
+def _budget_fallback_decision(
+    *,
+    args,
+    p_delta_norm: float,
+    qkv_delta_norm_p95: float,
+    pred_shift_p95_abs_bpm: float,
+    rr_range_violation_fraction: float,
+    stft_confidence_mean: float,
+) -> Tuple[int, str]:
+    if not bool(getattr(args, "profile_safety_budget", False)):
+        return 0, ""
+    reasons = []
+    if np.isfinite(p_delta_norm) and p_delta_norm > float(getattr(args, "profile_delta_budget_max", 3.0)):
+        reasons.append("profile_delta_norm")
+    if np.isfinite(qkv_delta_norm_p95) and qkv_delta_norm_p95 > float(getattr(args, "qkv_delta_budget_max", 1.0)):
+        reasons.append("qkv_delta_norm_p95")
+    if np.isfinite(pred_shift_p95_abs_bpm) and pred_shift_p95_abs_bpm > float(getattr(args, "pred_shift_budget_bpm", 3.0)):
+        reasons.append("pred_shift_p95_abs_bpm")
+    if np.isfinite(rr_range_violation_fraction) and rr_range_violation_fraction > float(getattr(args, "rr_range_violation_budget_frac", 0.05)):
+        reasons.append("rr_range_violation_fraction")
+    if (
+        bool(getattr(args, "profile_safety_budget_use_stft_confidence", True))
+        and np.isfinite(stft_confidence_mean)
+        and stft_confidence_mean < float(getattr(args, "budget_stft_confidence_floor", 0.005))
+    ):
+        reasons.append("stft_confidence_mean")
+    return int(bool(reasons)), ",".join(reasons)
 
 
 def adapt_profile_vector_unsupervised(
@@ -2911,7 +3305,7 @@ def adapt_profile_vector_unsupervised(
     use_readout_affine = (
         bool(getattr(args, "unsup_readout_affine", False))
         or ("readout_affine" in str(mode))
-        or ("sparc" in str(mode))
+        or ("sparc" in str(mode) and "sparc_pt" not in str(mode))
     )
     readout_affine = TorchAffineCalibrator().to(device) if use_readout_affine else None
 
@@ -2928,11 +3322,13 @@ def adapt_profile_vector_unsupervised(
     n_target = int(target_windows.imu.size(0))
     bs = max(2, int(args.unsup_feature_batch_size))
     stft_w = float(args.unsup_stft_consistency_weight)
+    uses_stft_pseudotarget = stft_w > 0.0
     smooth_w = float(args.unsup_smoothness_weight)
     drift_w = float(args.unsup_target_drift_weight)
     anchor_w = float(args.unsup_source_anchor_weight)
     prior_w = float(getattr(args, "unsup_profile_prior_weight", 0.01))
     attn_w = float(getattr(args, "unsup_attention_profile_weight", 0.0))
+    qkv_budget_w = float(getattr(args, "qkv_delta_budget_weight", 0.0))
 
     aux_cons_w = float(getattr(args, "unsup_aux_consistency_weight", 0.0))
     range_w = float(getattr(args, "unsup_rr_range_weight", 0.0))
@@ -2975,6 +3371,7 @@ def adapt_profile_vector_unsupervised(
         epoch_aux_cons: List[float] = []
         epoch_range: List[float] = []
         epoch_affine_prior: List[float] = []
+        epoch_qkv_budget: List[float] = []
 
         for st in range(0, n_target, bs):
             end = min(n_target, st + bs)
@@ -2997,15 +3394,23 @@ def adapt_profile_vector_unsupervised(
                 else readout_affine(_rr_probe)
             )
 
-            rr_loss_driver = rr_final if use_readout_affine else rr_aux
+            rr_loss_driver = (
+                rr_final
+                if use_readout_affine or not uses_stft_pseudotarget
+                else rr_aux
+            )
 
             disagreement = (rr_loss_driver - rr_stft.detach()).abs()
-            reliable = (
-                torch.isfinite(rr_loss_driver)
-                & torch.isfinite(rr_stft)
-                & torch.isfinite(conf)
-            )
-            reliable = reliable & (disagreement <= rr_disagreement_threshold)
+            reliable = torch.isfinite(rr_loss_driver)
+            if uses_stft_pseudotarget:
+                reliable = (
+                    reliable
+                    & torch.isfinite(rr_stft)
+                    & torch.isfinite(conf)
+                    & (disagreement <= rr_disagreement_threshold)
+                )
+            elif aux_cons_w > 0.0:
+                reliable = reliable & torch.isfinite(rr_final) & torch.isfinite(rr_aux)
             reliable = reliable & (rr_loss_driver >= rr_min_bpm) & (rr_loss_driver <= rr_max_bpm)
 
             if rr_loss_driver.numel() > 1 and max_temporal_jump_bpm > 0.0:
@@ -3015,10 +3420,13 @@ def adapt_profile_vector_unsupervised(
                 ).abs() <= max_temporal_jump_bpm
                 reliable = reliable & jump_ok
 
-            conf_w = conf.detach().clamp(float(conf_floor), 1.0).pow(float(conf_power)) * reliable.float()
-
-            consistency = _weighted_smooth_l1(
-                rr_loss_driver, rr_stft.detach(), conf_w)
+            if uses_stft_pseudotarget:
+                conf_w = conf.detach().clamp(float(conf_floor), 1.0).pow(float(conf_power)) * reliable.float()
+                consistency = _weighted_smooth_l1(
+                    rr_loss_driver, rr_stft.detach(), conf_w
+                )
+            else:
+                consistency = rr_loss_driver.new_tensor(0.0)
 
             if rr_loss_driver.numel() > 1:
                 smooth_mask = (reliable[1:] & reliable[:-1]).float()
@@ -3033,6 +3441,7 @@ def adapt_profile_vector_unsupervised(
 
             target_drift = F.mse_loss(z, z_ref)
             profile_prior = F.mse_loss(p_target, p0.detach())
+            qkv_budget = _qkv_delta_norm_tensor(model, p_target).pow(2)
 
             if attn_w > 0.0 and attn_metrics and source_attn_ref:
                 attn_terms = []
@@ -3056,7 +3465,7 @@ def adapt_profile_vector_unsupervised(
             else:
                 source_anchor = target_drift.new_tensor(0.0)
 
-            if aux_cons_w > 0.0 and use_readout_affine:
+            if aux_cons_w > 0.0 and (use_readout_affine or not uses_stft_pseudotarget):
                 aux_consistency = _weighted_smooth_l1(
                     rr_final,
                     rr_aux.detach(),
@@ -3090,6 +3499,7 @@ def adapt_profile_vector_unsupervised(
                 + attn_w * attention_profile
                 + range_w * range_loss
                 + affine_prior
+                + qkv_budget_w * qkv_budget
             )
             loss.backward()
             if float(args.grad_clip) > 0.0:
@@ -3109,6 +3519,7 @@ def adapt_profile_vector_unsupervised(
             epoch_aux_cons.append(float(aux_consistency.detach().cpu()))
             epoch_range.append(float(range_loss.detach().cpu()))
             epoch_affine_prior.append(float(affine_prior.detach().cpu()))
+            epoch_qkv_budget.append(float(qkv_budget.detach().cpu()))
 
         last_log = {
             "unsup_feature_tta_epoch": int(epoch),
@@ -3122,6 +3533,7 @@ def adapt_profile_vector_unsupervised(
             "unsup_aux_consistency_last": float(np.mean(epoch_aux_cons)) if epoch_aux_cons else 0.0,
             "unsup_rr_range_loss_last": float(np.mean(epoch_range)) if epoch_range else 0.0,
             "unsup_readout_affine_prior_last": float(np.mean(epoch_affine_prior)) if epoch_affine_prior else 0.0,
+            "qkv_delta_budget_loss_last": float(np.mean(epoch_qkv_budget)) if epoch_qkv_budget else 0.0,
             "unsup_stft_confidence_mean_last": float(np.mean(epoch_conf)) if epoch_conf else float("nan"),
             "unsup_reliable_window_ratio": float(np.mean(epoch_reliable)) if epoch_reliable else float("nan"),
             "unsup_rr_disagreement_mean": float(np.mean(epoch_rr_disagreement)) if epoch_rr_disagreement else float("nan"),
@@ -3134,6 +3546,7 @@ def adapt_profile_vector_unsupervised(
         p_target,
         args,
     )
+    adapter_diag = _profile_adapter_delta_diagnostics(model, p_target)
     p_delta = p_target.detach() - p0.detach()
 
     n_affine_params = int(
@@ -3154,15 +3567,19 @@ def adapt_profile_vector_unsupervised(
         **train_counts,
         **last_log,
         **diag,
+        **adapter_diag,
+        **_profile_clsa_config_diagnostics(model, args),
         "feature_tta_mode": mode,
         "unsup_feature_tta_epochs": int(args.unsup_feature_epochs),
         "unsup_feature_tta_lr": float(args.unsup_feature_lr),
         "unsup_stft_consistency_weight": float(stft_w),
+        "uses_stft_pseudotarget_for_tta": int(bool(uses_stft_pseudotarget)),
         "unsup_smoothness_weight": float(smooth_w),
         "unsup_source_anchor_weight": float(args.unsup_source_anchor_weight),
         "unsup_target_drift_weight": float(drift_w),
         "unsup_profile_prior_weight": float(prior_w),
         "unsup_attention_profile_weight": float(attn_w),
+        "qkv_delta_budget_weight": float(qkv_budget_w),
         "unsup_stft_confidence_floor": float(conf_floor),
         "unsup_stft_confidence_power": float(conf_power),
         "unsup_rr_disagreement_threshold": float(rr_disagreement_threshold),
@@ -3179,9 +3596,15 @@ def adapt_profile_vector_unsupervised(
         "readout_affine_b": float(readout_affine.b.detach().cpu()) if readout_affine is not None else 0.0,
         "profile_delta_norm": float(p_delta.norm(p=2).cpu()),
         "profile_film_scale": float(getattr(model, "profile_film_scale", getattr(args, "profile_film_scale", 0.1))),
+        "profile_film_placement": str(getattr(model, "profile_film_placement", getattr(args, "profile_film_placement", "token_pooled"))),
+        "profile_film_residual_alpha": float(getattr(model, "profile_film_residual_alpha", getattr(args, "profile_film_residual_alpha", 0.1))),
         "profile_qkv_scale": float(getattr(model, "profile_qkv_scale", getattr(args, "profile_qkv_scale", 0.1))),
         "profile_qkv_layers_used": str(getattr(model, "profile_qkv_layers", getattr(args, "profile_qkv_layers", "last1"))),
+        "profile_qkv_residual": int(bool(getattr(model, "profile_qkv_residual", getattr(args, "profile_qkv_residual", False)))),
         "profile_conditioning_mode": str(getattr(model, "profile_conditioning", "none")),
+        "profile_safety_budget_use_stft_confidence": int(bool(getattr(args, "profile_safety_budget_use_stft_confidence", True))),
+        "profile_unsup_episodic_batch": int(bool(getattr(args, "profile_unsup_episodic_batch", False))),
+        "profile_unsup_episodic_batches": 0,
         "profile_adapted_vector": 1,
         "profile_adapted_encoder": 0,
         "profile_adapted_film": 0,
@@ -3198,6 +3621,88 @@ def adapt_profile_vector_unsupervised(
         extra[f"attn_distance_source_{key}"] = float(value)
 
     return p_target, readout_affine, extra
+
+
+def _mean_episodic_profile_extras(rows: List[Dict[str, float]]) -> Dict[str, float]:
+    if not rows:
+        return {}
+    keys = sorted({key for row in rows for key in row.keys()})
+    out: Dict[str, float] = {}
+    for key in keys:
+        vals = [row[key] for row in rows if key in row]
+        if vals and all(isinstance(v, (int, float, np.integer, np.floating)) for v in vals):
+            out[key] = float(np.mean([float(v) for v in vals]))
+        elif vals:
+            out[key] = vals[-1]
+    out["profile_unsup_episodic_batch"] = 1
+    out["profile_unsup_episodic_batches"] = int(len(rows))
+    return out
+
+
+def adapt_profile_vector_episodic_batches(
+    model: nn.Module,
+    rr_model: FaithfulRRRegressor,
+    target_loader,
+    eval_windows: TensorWindows,
+    source_anchor_windows: TensorWindows,
+    mode: str,
+    args,
+    device: str,
+    conditioning_mode: str,
+    target_profile_stats_raw: torch.Tensor,
+    target_profile_stats_norm: torch.Tensor,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    """Reset p_t for each target batch, adapt on that batch, then evaluate it."""
+    if eval_windows.imu.size(0) == 0:
+        raise RuntimeError("Episodic profile-vector TTT needs evaluation windows.")
+    bs = max(1, int(args.unsup_feature_batch_size))
+    preds: List[np.ndarray] = []
+    feats: List[np.ndarray] = []
+    stft_rrs: List[np.ndarray] = []
+    aux_rrs: List[np.ndarray] = []
+    confs: List[np.ndarray] = []
+    extra_rows: List[Dict[str, float]] = []
+
+    for st in range(0, int(eval_windows.imu.size(0)), bs):
+        end = min(int(eval_windows.imu.size(0)), st + bs)
+        batch_windows = eval_windows.subset(np.arange(st, end, dtype=np.int64))
+        p_batch, readout_affine, extra = adapt_profile_vector_unsupervised(
+            model,
+            rr_model,
+            target_loader,
+            batch_windows,
+            source_anchor_windows,
+            mode,
+            args,
+            device,
+            target_profile_stats_raw=target_profile_stats_raw,
+            target_profile_stats_norm=target_profile_stats_norm,
+        )
+        pred, z, rr_stft, rr_aux, conf = _predict_profile_unsup_with_features(
+            model,
+            rr_model,
+            batch_windows,
+            p_batch,
+            device,
+            int(args.feature_eval_batch_size),
+            conditioning_mode,
+            readout_affine=readout_affine,
+        )
+        preds.append(pred)
+        feats.append(z)
+        stft_rrs.append(rr_stft)
+        aux_rrs.append(rr_aux)
+        confs.append(conf)
+        extra_rows.append(extra)
+
+    return (
+        np.concatenate(preds, axis=0),
+        np.concatenate(feats, axis=0).astype(np.float32),
+        np.concatenate(stft_rrs, axis=0),
+        np.concatenate(aux_rrs, axis=0),
+        np.concatenate(confs, axis=0),
+        _mean_episodic_profile_extras(extra_rows),
+    )
 
 
 def adapt_feature_space_unsupervised(
@@ -3642,36 +4147,61 @@ def profile_vector_unsupervised_evaluate(
 
         needs_adapt = not _profile_mode_init_only(mode)
         if needs_adapt:
-            p_target, readout_affine, extra = adapt_profile_vector_unsupervised(
-                model,
-                rr_model,
-                test_loader,
-                adapt_windows,
-                source_anchor_windows,
-                mode,
-                args,
-                device,
-                target_profile_stats_raw=target_profile_stats_raw,
-                target_profile_stats_norm=target_profile_stats_norm,
-            )
-            pred_candidate_post, z_profile_post_eval, stft_rr_eval, aux_rr_eval, stft_conf_eval = _predict_profile_unsup_with_features(
-                model,
-                rr_model,
-                eval_windows,
-                p_target,
-                device,
-                int(args.feature_eval_batch_size),
-                conditioning_mode,
-                readout_affine=readout_affine,
-            )
-            attn_post = _collect_profile_attention_reference(
-                model,
-                eval_windows,
-                p_target.detach(),
-                device,
-                batch_size=int(args.feature_eval_batch_size),
-                conditioning_mode=conditioning_mode,
-            )
+            if bool(getattr(args, "profile_unsup_episodic_batch", False)):
+                p_target = nn.Parameter(p0.detach().clone())
+                readout_affine = None
+                (
+                    pred_candidate_post,
+                    z_profile_post_eval,
+                    stft_rr_eval,
+                    aux_rr_eval,
+                    stft_conf_eval,
+                    extra,
+                ) = adapt_profile_vector_episodic_batches(
+                    model,
+                    rr_model,
+                    test_loader,
+                    eval_windows,
+                    source_anchor_windows,
+                    mode,
+                    args,
+                    device,
+                    conditioning_mode,
+                    target_profile_stats_raw,
+                    target_profile_stats_norm,
+                )
+                attn_post = attn_pre
+            else:
+                p_target, readout_affine, extra = adapt_profile_vector_unsupervised(
+                    model,
+                    rr_model,
+                    test_loader,
+                    adapt_windows,
+                    source_anchor_windows,
+                    mode,
+                    args,
+                    device,
+                    target_profile_stats_raw=target_profile_stats_raw,
+                    target_profile_stats_norm=target_profile_stats_norm,
+                )
+                pred_candidate_post, z_profile_post_eval, stft_rr_eval, aux_rr_eval, stft_conf_eval = _predict_profile_unsup_with_features(
+                    model,
+                    rr_model,
+                    eval_windows,
+                    p_target,
+                    device,
+                    int(args.feature_eval_batch_size),
+                    conditioning_mode,
+                    readout_affine=readout_affine,
+                )
+                attn_post = _collect_profile_attention_reference(
+                    model,
+                    eval_windows,
+                    p_target.detach(),
+                    device,
+                    batch_size=int(args.feature_eval_batch_size),
+                    conditioning_mode=conditioning_mode,
+                )
         else:
             p_target = nn.Parameter(p0.detach().clone())
             readout_affine = None
@@ -3712,6 +4242,26 @@ def profile_vector_unsupervised_evaluate(
             selected = "profile_init_only"
         else:
             pred_post = pred_candidate_post
+
+        rr_base_eval = pred_pre[: y_eval_for_metrics.shape[0]]
+        pred_shift = pred_post - rr_base_eval
+        rr_range_violation = (
+            (pred_post < float(getattr(args, "unsup_rr_min_bpm", 4.0)))
+            | (pred_post > float(getattr(args, "unsup_rr_max_bpm", 45.0)))
+            | (~np.isfinite(pred_post))
+        )
+        fallback_triggered, fallback_reason = _budget_fallback_decision(
+            args=args,
+            p_delta_norm=float(extra.get("profile_delta_norm", 0.0)),
+            qkv_delta_norm_p95=float(extra.get("qkv_delta_norm_p95", 0.0)),
+            pred_shift_p95_abs_bpm=float(np.percentile(np.abs(pred_shift), 95)) if pred_shift.size else float("nan"),
+            rr_range_violation_fraction=float(np.mean(rr_range_violation)) if rr_range_violation.size else float("nan"),
+            stft_confidence_mean=float(np.mean(stft_conf_eval)) if stft_conf_eval.size else float("nan"),
+        )
+        if fallback_triggered:
+            pred_post = rr_base_eval
+            selected = "none_budget_fallback"
+            pred_shift = pred_post - rr_base_eval
 
         metrics.update(rr_metrics(y_eval_for_metrics, pred_post, prefix="rr_probe_post"))
         metrics.update(rr_metrics(y_eval_for_metrics, pred_profile_init, prefix="rr_probe_profile_init"))
@@ -3784,12 +4334,24 @@ def profile_vector_unsupervised_evaluate(
             "eval_stft_rr_mae_vs_label": _mae_np(y_eval_for_metrics, stft_rr_eval),
             "eval_aux_rr_mae_vs_label": _mae_np(y_eval_for_metrics, aux_rr_eval),
             "eval_stft_confidence_mean": float(np.mean(stft_conf_eval)) if stft_conf_eval.size else float("nan"),
+            "eval_stft_confidence_p05": float(np.percentile(stft_conf_eval, 5)) if stft_conf_eval.size else float("nan"),
+            "eval_stft_confidence_p95": float(np.percentile(stft_conf_eval, 95)) if stft_conf_eval.size else float("nan"),
             "profile_init_adapt_mae_vs_label": _mae_np(y_adapt, pred_profile_init_adapt),
             "profile_base_adapt_mae_vs_label": _mae_np(y_adapt, base_probe_adapt),
             "profile_candidate_eval_mae_vs_label": _mae_np(y_eval_for_metrics, pred_candidate_post),
             "eval_probe_pre_matches_tensor_labels": int(y_eval_tensor.shape[0] == y_eval.shape[0]),
             "profile_unsup_adapt_scope": adapt_scope_used,
             "profile_unsup_n_adapt_windows": int(adapt_windows.imu.size(0)),
+            "pred_shift_signed_mean_bpm": float(np.mean(pred_shift)) if pred_shift.size else float("nan"),
+            "pred_shift_abs_mean_bpm": float(np.mean(np.abs(pred_shift))) if pred_shift.size else float("nan"),
+            "pred_shift_p95_abs_bpm": float(np.percentile(np.abs(pred_shift), 95)) if pred_shift.size else float("nan"),
+            "stft_confidence_mean": float(np.mean(stft_conf_eval)) if stft_conf_eval.size else float("nan"),
+            "stft_confidence_p05": float(np.percentile(stft_conf_eval, 5)) if stft_conf_eval.size else float("nan"),
+            "stft_confidence_p95": float(np.percentile(stft_conf_eval, 95)) if stft_conf_eval.size else float("nan"),
+            "probe_stft_disagreement_mean_bpm": float(np.mean(np.abs(pred_post - stft_rr_eval))) if stft_rr_eval.size else float("nan"),
+            "rr_range_violation_fraction": float(np.mean(rr_range_violation)) if rr_range_violation.size else float("nan"),
+            "fallback_triggered": int(fallback_triggered),
+            "fallback_reason": fallback_reason,
         })
         for key, value in attn_pre.items():
             metrics[f"attn_distance_pre_{key}"] = float(value)
@@ -3797,6 +4359,7 @@ def profile_vector_unsupervised_evaluate(
             metrics[f"attn_distance_post_{key}"] = float(value)
             if key in attn_pre:
                 metrics[f"attn_distance_delta_{key}"] = float(value - attn_pre[key])
+        metrics.update(_profile_clsa_metric_diagnostics([attn_post]))
 
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -4109,12 +4672,18 @@ def rr_config_sweep_hook(model, sbj: str, train_loader, test_loader, device: str
             "rr_tta_mode": mode,
             "unsup_mode_defaults_applied": int(getattr(mode_args, "unsup_mode_defaults_applied", 0)),
             "effective_unsup_stft_consistency_weight": float(getattr(mode_args, "unsup_stft_consistency_weight", 0.0)),
+            "effective_uses_stft_pseudotarget_for_tta": int(float(getattr(mode_args, "unsup_stft_consistency_weight", 0.0)) > 0.0),
             "effective_unsup_smoothness_weight": float(getattr(mode_args, "unsup_smoothness_weight", 0.0)),
             "effective_unsup_source_anchor_weight": float(getattr(mode_args, "unsup_source_anchor_weight", 0.0)),
             "effective_unsup_target_drift_weight": float(getattr(mode_args, "unsup_target_drift_weight", 0.0)),
             "effective_unsup_profile_prior_weight": float(getattr(mode_args, "unsup_profile_prior_weight", 0.0)),
             "effective_unsup_attention_profile_weight": float(getattr(mode_args, "unsup_attention_profile_weight", 0.0)),
             "effective_unsup_feature_lr": float(getattr(mode_args, "unsup_feature_lr", 0.0)),
+            "effective_profile_safety_budget_use_stft_confidence": int(bool(getattr(mode_args, "profile_safety_budget_use_stft_confidence", True))),
+            "effective_profile_qkv_mode": str(getattr(mode_args, "profile_qkv_mode", "static")),
+            "effective_profile_clsa_rank": int(getattr(mode_args, "profile_clsa_rank", 8)),
+            "effective_profile_clsa_scale": float(getattr(mode_args, "profile_clsa_scale", 0.01)),
+            "effective_profile_clsa_enable_fast_update": int(bool(int(getattr(mode_args, "profile_clsa_enable_fast_update", 1)))),
         })
         row = {"subject": sbj, **metrics}
         chunk_summary = sweep_root / mode / "chunks" / f"{run_id}_rr_structured_adaptation_summary.csv"
@@ -4192,6 +4761,17 @@ def add_common_adaptation_args(parser) -> None:
             "profile_film_unsup_sparc",
             "profile_film_gated_sparc",
             "profile_film_oracle_sparc",
+            "tcn_profile_film_qkv_last1_0p01",
+            "tcn_profile_film_qkv_last1_0p01_sparc_pt",
+            "tcn_profile_film_qkv_last1_0p01_sparc_pt_budget",
+            "tcn_profile_film_qkv_last1_0p01_pt_no_stft",
+            "tcn_profile_film_qkv_last1_0p01_pt_aux_only",
+            "tcn_profile_film_qkv_last1_0p01_pt_reg_only",
+            "tcn_profile_film_qkv_last1_0p01_pt_no_stft_budget",
+            "tcn_profile_film_clsa_qkv_last1",
+            "tcn_profile_film_clsa_qkv_last1_no_fast_update",
+            "tcn_clsa_qkv_last1_no_film",
+            "tcn_profile_film_clsa_qkv_last1_rank4",
             "direct_stft_rr",
             "hybrid_probe_stft_conf",
             "ssa",
@@ -4250,6 +4830,25 @@ def add_common_adaptation_args(parser) -> None:
     parser.add_argument("--unsup-rr-min-bpm", type=float, default=4.0)
     parser.add_argument("--unsup-rr-max-bpm", type=float, default=45.0)
     parser.add_argument("--unsup-max-temporal-jump-bpm", type=float, default=10.0)
+    parser.add_argument("--qkv-delta-budget-weight", type=float, default=0.0)
+    parser.add_argument("--qkv-delta-budget-max", type=float, default=1.0)
+    parser.add_argument("--profile-delta-budget-max", type=float, default=3.0)
+    parser.add_argument("--pred-shift-budget-bpm", type=float, default=3.0)
+    parser.add_argument("--rr-range-violation-budget-frac", type=float, default=0.05)
+    parser.add_argument("--budget-stft-confidence-floor", type=float, default=0.005)
+    parser.add_argument("--profile-safety-budget", action="store_true", help="Enable unlabeled budget fallback for profile-vector modes.")
+    parser.add_argument(
+        "--profile-safety-budget-use-stft-confidence",
+        action="store_true",
+        default=True,
+        help="Allow low STFT reconstruction confidence to trigger profile budget fallback.",
+    )
+    parser.add_argument(
+        "--no-profile-safety-budget-use-stft-confidence",
+        dest="profile_safety_budget_use_stft_confidence",
+        action="store_false",
+        help="Disable STFT-confidence veto in profile budget fallback; useful for no-STFT TTA ablations.",
+    )
     # Readout ablation / hybrid controls.
     parser.add_argument("--hybrid-stft-confidence-threshold", type=float, default=0.005)
     parser.add_argument("--hybrid-aux-stft-disagreement-bpm", type=float, default=3.0)
@@ -4275,20 +4874,40 @@ def add_common_adaptation_args(parser) -> None:
     )
     _add_argument_if_absent(parser, "--use-profile-film", action="store_true")
     _add_argument_if_absent(parser, "--use-profile-qkv", action="store_true")
+    _add_argument_if_absent(parser, "--shared-profile-qkv", action="store_true")
     _add_argument_if_absent(parser, "--use-profile-lora", action="store_true")
-    _add_argument_if_absent(parser, "--profile-conditioning", default="none", choices=["none", "film", "qkv", "lora"])
+    _add_argument_if_absent(parser, "--profile-conditioning", default="none", choices=["none", "film", "qkv", "film_qkv", "lora"])
     _add_argument_if_absent(parser, "--profile-dim", type=int, default=32)
     _add_argument_if_absent(parser, "--profile-stats-dim", type=int, default=0)
     _add_argument_if_absent(parser, "--profile-hidden-dim", type=int, default=128)
     _add_argument_if_absent(parser, "--profile-film-scale", type=float, default=0.1)
+    _add_argument_if_absent(
+        parser,
+        "--profile-film-placement",
+        default="token_pooled",
+        choices=["token_pooled", "pooled_only", "late_token_only", "residual"],
+    )
+    _add_argument_if_absent(parser, "--profile-film-residual-alpha", type=float, default=0.1)
     _add_argument_if_absent(parser, "--profile-qkv-scale", type=float, default=0.1)
     _add_argument_if_absent(parser, "--profile-qkv-layers", default="last1", choices=["last1", "last2", "all"])
+    _add_argument_if_absent(parser, "--profile-qkv-residual", action="store_true")
+    _add_argument_if_absent(parser, "--profile-qkv-mode", default="static", choices=["static", "clsa"])
+    _add_argument_if_absent(parser, "--profile-clsa-rank", type=int, default=8)
+    _add_argument_if_absent(parser, "--profile-clsa-scale", type=float, default=0.01)
+    _add_argument_if_absent(parser, "--profile-clsa-eta-max", type=float, default=0.1)
+    _add_argument_if_absent(parser, "--profile-clsa-enable-fast-update", type=int, default=1)
+    _add_argument_if_absent(parser, "--profile-clsa-gate-init-bias", type=float, default=-2.0)
+    _add_argument_if_absent(parser, "--profile-clsa-loss-weight", type=float, default=0.0)
     _add_argument_if_absent(parser, "--profile-lora-rank", type=int, default=8)
     _add_argument_if_absent(parser, "--profile-lora-scale", type=float, default=0.05)
     _add_argument_if_absent(parser, "--profile-stats-max-batches", type=int, default=50)
     parser.add_argument("--adapt-profile-vector", action="store_true")
     parser.add_argument("--adapt-profile-encoder", action="store_true")
     parser.add_argument("--adapt-profile-film", action="store_true")
+    _add_argument_if_absent(parser, "--use-tcn-token-mixer", action="store_true")
+    _add_argument_if_absent(parser, "--tcn-mixer-alpha", type=float, default=0.05)
+    _add_argument_if_absent(parser, "--tcn-mixer-hidden", type=int, default=32)
+    _add_argument_if_absent(parser, "--tcn-mixer-layers", type=int, default=2)
     parser.add_argument(
         "--use-unsup-mode-defaults",
         action="store_true",
@@ -4337,6 +4956,11 @@ def add_common_adaptation_args(parser) -> None:
             "--target-calibration-mode random/even to test representative-subject calibration; "
             "use full for transductive subject-level TTA."
         ),
+    )
+    parser.add_argument(
+        "--profile-unsup-episodic-batch",
+        action="store_true",
+        help="Reset and adapt the target profile vector independently for each evaluation batch.",
     )
 
     # Source-distribution feature canonicalization. These modes are unsupervised:

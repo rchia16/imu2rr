@@ -111,6 +111,141 @@ class ProfileConditioner(nn.Module):
         return cq, ck, cv
 
 
+class ProfileCLSAQKVAdapter(nn.Module):
+    """Profile-conditioned one-step CLSA-QKV residual adapter.
+
+    This is a low-capacity fast branch: slow parameters are learned during
+    source training, while per-sample fast weights are generated from the
+    profile vector and updated once inside the forward pass using a token-level
+    self-alignment loss. The fast weights are discarded after the forward pass.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        profile_dim: int,
+        rank: int = 8,
+        scale: float = 0.01,
+        eta_max: float = 0.1,
+        hidden_dim: int = 128,
+        gate_init_bias: float = -2.0,
+    ):
+        super().__init__()
+        if int(d_model) <= 0:
+            raise ValueError(f"d_model must be positive, got {d_model}")
+        if int(profile_dim) <= 0:
+            raise ValueError(f"profile_dim must be positive, got {profile_dim}")
+        if int(rank) <= 0:
+            raise ValueError(f"rank must be positive, got {rank}")
+        self.d_model = int(d_model)
+        self.profile_dim = int(profile_dim)
+        self.rank = int(rank)
+        self.scale = float(scale)
+        self.eta_max = float(eta_max)
+        self.hidden_dim = int(hidden_dim)
+
+        self.norm = nn.LayerNorm(self.d_model)
+        self.q_proj = nn.Linear(self.d_model, self.d_model)
+        self.k_proj = nn.Linear(self.d_model, self.d_model)
+        self.v_proj = nn.Linear(self.d_model, self.d_model)
+
+        # Keep the first implementation explicit and low-rank. hidden_dim is
+        # retained in the signature for future MLP initializers, but the linear
+        # map is intentionally minimal and easy to audit.
+        self.profile_to_a = nn.Linear(self.profile_dim, self.d_model * self.rank)
+        self.profile_to_b = nn.Linear(self.profile_dim, self.rank * self.d_model)
+        self.profile_to_eta = nn.Linear(self.profile_dim, 1)
+        self.profile_to_gate = nn.Linear(self.profile_dim, 1)
+
+        # Conservative init: no-fast-update mode is an exact near-no-op at
+        # initialization because B starts at zero and the gate starts mostly shut.
+        nn.init.zeros_(self.profile_to_b.weight)
+        nn.init.zeros_(self.profile_to_b.bias)
+        nn.init.constant_(self.profile_to_gate.bias, float(gate_init_bias))
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        profile: torch.Tensor,
+        enable_fast_update: bool = True,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if h.ndim != 3:
+            raise ValueError(f"Expected h with shape (B,T,D), got {tuple(h.shape)}")
+        if profile.ndim == 1:
+            profile = profile.unsqueeze(0)
+        if profile.ndim != 2:
+            raise ValueError(f"Expected profile with shape (B,P) or (P,), got {tuple(profile.shape)}")
+        if h.size(0) != profile.size(0):
+            raise ValueError(f"Batch mismatch between h ({h.size(0)}) and profile ({profile.size(0)})")
+        if h.size(-1) != self.d_model:
+            raise ValueError(f"Expected h last dim {self.d_model}, got {h.size(-1)}")
+        if profile.size(-1) != self.profile_dim:
+            raise ValueError(f"Expected profile last dim {self.profile_dim}, got {profile.size(-1)}")
+
+        # This forward can be called from evaluation helpers wrapped in
+        # torch.no_grad(). The one-step local fast update still needs gradients
+        # with respect to A_fast/B_fast, so locally re-enable autograd.
+        with torch.enable_grad():
+            bsz, _tokens, dim = h.shape
+            x = self.norm(h)
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+
+            a0 = self.profile_to_a(profile).view(bsz, dim, self.rank)
+            b0 = self.profile_to_b(profile).view(bsz, self.rank, dim)
+            a0 = a0.requires_grad_(True)
+            b0 = b0.requires_grad_(True)
+
+            z0 = torch.bmm(torch.bmm(k, a0), b0)
+            target = (v - k).detach()
+            z0_ln = F.layer_norm(z0, z0.shape[-1:])
+            clsa_loss = 0.5 * F.mse_loss(z0_ln, target)
+
+            if bool(enable_fast_update):
+                grad_a, grad_b = torch.autograd.grad(
+                    clsa_loss,
+                    [a0, b0],
+                    create_graph=bool(self.training),
+                    retain_graph=True,
+                    allow_unused=False,
+                )
+                eta = F.softplus(self.profile_to_eta(profile)).clamp(max=self.eta_max).view(bsz, 1, 1)
+                a1 = a0 - eta * grad_a
+                b1 = b0 - eta * grad_b
+                fast_update_norm = (
+                    torch.linalg.vector_norm((eta * grad_a).reshape(bsz, -1), dim=1)
+                    + torch.linalg.vector_norm((eta * grad_b).reshape(bsz, -1), dim=1)
+                )
+            else:
+                eta = torch.zeros(bsz, 1, 1, device=h.device, dtype=h.dtype)
+                a1, b1 = a0, b0
+                fast_update_norm = torch.zeros(bsz, device=h.device, dtype=h.dtype)
+
+            delta = torch.bmm(torch.bmm(q, a1), b1)
+            gate = torch.sigmoid(self.profile_to_gate(profile)).view(bsz, 1, 1)
+            out = h + float(self.scale) * gate * delta
+
+            delta_norm = delta.detach().norm(dim=-1).reshape(-1)
+            gate_flat = gate.detach().reshape(-1)
+            eta_flat = eta.detach().reshape(-1)
+            fast_update_norm_det = fast_update_norm.detach().reshape(-1)
+            target_norm = target.detach().norm(dim=-1).reshape(-1)
+            metrics = {
+                "profile_clsa_loss": clsa_loss,
+                "profile_clsa_gate_mean": gate_flat.mean(),
+                "profile_clsa_gate_p05": torch.quantile(gate_flat, 0.05),
+                "profile_clsa_gate_p95": torch.quantile(gate_flat, 0.95),
+                "profile_clsa_eta_mean": eta_flat.mean(),
+                "profile_clsa_delta_norm_mean": delta_norm.mean(),
+                "profile_clsa_delta_norm_p95": torch.quantile(delta_norm, 0.95),
+                "profile_clsa_target_norm_mean": target_norm.mean(),
+                "profile_clsa_fast_update_norm_mean": fast_update_norm_det.mean(),
+                "profile_clsa_fast_update_norm_p95": torch.quantile(fast_update_norm_det, 0.95),
+            }
+        return out, metrics
+
+
 class ProfileLowRankAdapter(nn.Module):
     """Apply a profile-generated low-rank residual update to token features."""
 
@@ -324,6 +459,115 @@ class TokenTCNRRHead(nn.Module):
         return self.head(pooled).squeeze(-1)
 
 
+class DepthwiseTemporalTokenMixer(nn.Module):
+    """Lightweight local temporal mixer for projected IMU STFT tokens."""
+
+    def __init__(self, d_model: int, kernel_size: int = 5, dropout: float = 0.1):
+        super().__init__()
+        if int(kernel_size) < 1 or int(kernel_size) % 2 == 0:
+            raise ValueError(f"kernel_size must be a positive odd integer, got {kernel_size}")
+        padding = int(kernel_size) // 2
+        self.norm = nn.LayerNorm(d_model)
+        self.depthwise = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=int(kernel_size),
+            padding=padding,
+            groups=d_model,
+        )
+        self.pointwise = nn.Conv1d(d_model, d_model, kernel_size=1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        y = self.norm(x).transpose(1, 2)
+        y = self.depthwise(y)
+        y = F.gelu(self.pointwise(y)).transpose(1, 2)
+        return residual + self.dropout(y)
+
+
+class RawTCNBlock(nn.Module):
+    def __init__(self, channels: int, kernel_size: int = 3, dilation: int = 1, dropout: float = 0.1):
+        super().__init__()
+        if int(kernel_size) < 1:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
+        padding = ((int(kernel_size) - 1) * int(dilation)) // 2
+        self.conv = nn.Conv1d(
+            channels,
+            channels,
+            kernel_size=int(kernel_size),
+            dilation=int(dilation),
+            padding=padding,
+        )
+        self.norm = nn.BatchNorm1d(channels)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv(x)
+        if y.size(-1) != x.size(-1):
+            y = F.interpolate(y, size=x.size(-1), mode="linear", align_corners=False)
+        y = self.dropout(F.relu(self.norm(y)))
+        return x + y
+
+
+class ResidualIMUTemporalMixer(nn.Module):
+    """Small residual temporal mixer on raw IMU before STFT tokenisation."""
+
+    def __init__(
+        self,
+        channels: int,
+        hidden: int = 32,
+        layers: int = 2,
+        alpha: float = 0.05,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.channels = int(channels)
+        self.hidden = int(hidden)
+        self.layers_n = int(layers)
+        self.alpha = float(alpha)
+        blocks: List[nn.Module] = [
+            nn.Conv1d(self.channels, self.hidden, kernel_size=1),
+            nn.GELU(),
+        ]
+        for i in range(max(1, self.layers_n)):
+            dilation = i + 1
+            blocks.extend(
+                [
+                    nn.GroupNorm(1, self.hidden),
+                    nn.Conv1d(
+                        self.hidden,
+                        self.hidden,
+                        kernel_size=5,
+                        padding=2 * dilation,
+                        dilation=dilation,
+                        groups=max(1, self.hidden),
+                    ),
+                    nn.GELU(),
+                    nn.Dropout(float(dropout)),
+                    nn.Conv1d(self.hidden, self.hidden, kernel_size=1),
+                    nn.GELU(),
+                ]
+            )
+        blocks.append(nn.Conv1d(self.hidden, self.channels, kernel_size=1))
+        self.net = nn.Sequential(*blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected x with shape (B,T,C), got {tuple(x.shape)}")
+        if x.size(-1) != self.channels:
+            raise ValueError(f"Expected {self.channels} IMU channels, got {x.size(-1)}")
+        y = self.net(x.transpose(1, 2)).transpose(1, 2)
+        if y.size(1) != x.size(1):
+            y = F.interpolate(
+                y.transpose(1, 2),
+                size=x.size(1),
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2)
+        return x + float(self.alpha) * y
+
+
 class TinyIMU2PressureViT(nn.Module):
     def __init__(
         self,
@@ -344,11 +588,26 @@ class TinyIMU2PressureViT(nn.Module):
         profile_stats_dim: int = 0,
         profile_hidden_dim: int = 128,
         profile_film_scale: float = 0.1,
+        profile_film_placement: str = "token_pooled",
+        profile_film_residual_alpha: float = 0.1,
         profile_qkv_scale: float = 0.1,
         profile_qkv_layers: str = "last1",
+        profile_qkv_residual: bool = False,
+        profile_qkv_mode: str = "static",
+        profile_clsa_rank: int = 8,
+        profile_clsa_scale: float = 0.01,
+        profile_clsa_eta_max: float = 0.1,
+        profile_clsa_gate_init_bias: float = -2.0,
+        profile_clsa_enable_fast_update: bool = True,
+        profile_clsa_loss_weight: float = 0.0,
         decoder_mode: str = "gru",
         decoder_layers: int = 1,
         rr_from: str = "encoder",
+        imu_token_mixer: str = "dwconv",
+        use_tcn_token_mixer: bool = False,
+        tcn_mixer_alpha: float = 0.05,
+        tcn_mixer_hidden: int = 32,
+        tcn_mixer_layers: int = 2,
         rr_head_type: str = "mlp",
         rr_tcn_layers: int = 2,
         rr_tcn_kernel_size: int = 3,
@@ -365,24 +624,54 @@ class TinyIMU2PressureViT(nn.Module):
         if requested_profile_mode in {"", "auto"}:
             requested_profile_mode = "none"
         if requested_profile_mode == "none":
-            if bool(use_profile_qkv):
+            if bool(use_profile_film) and bool(use_profile_qkv):
+                requested_profile_mode = "film_qkv"
+            elif bool(use_profile_qkv):
                 requested_profile_mode = "qkv"
             elif bool(use_profile_film):
                 requested_profile_mode = "film"
-        if requested_profile_mode not in {"none", "film", "qkv"}:
+        if requested_profile_mode in {"qkv_film", "shared_film_qkv", "shared_profile_qkv"}:
+            requested_profile_mode = "film_qkv"
+        if requested_profile_mode not in {"none", "film", "qkv", "film_qkv"}:
             raise ValueError(
-                f"profile_conditioning must be one of none/film/qkv, got {profile_conditioning!r}"
+                f"profile_conditioning must be one of none/film/qkv/film_qkv, got {profile_conditioning!r}"
             )
         self.profile_conditioning = requested_profile_mode
         self.use_profile_conditioning = self.profile_conditioning != "none"
-        self.use_profile_film = self.profile_conditioning == "film"
-        self.use_profile_qkv = self.profile_conditioning == "qkv"
+        self.use_profile_film = self.profile_conditioning in {"film", "film_qkv"}
+        self.use_profile_qkv = self.profile_conditioning in {"qkv", "film_qkv"}
         self.profile_dim = int(profile_dim)
         self.profile_stats_dim = int(profile_stats_dim)
         self.profile_hidden_dim = int(profile_hidden_dim)
         self.profile_film_scale = float(profile_film_scale)
+        self.profile_film_placement = str(profile_film_placement).lower().strip()
+        if self.profile_film_placement in {"current", "token+pooled", "token_and_pooled"}:
+            self.profile_film_placement = "token_pooled"
+        if self.profile_film_placement not in {
+            "token_pooled",
+            "pooled_only",
+            "late_token_only",
+            "residual",
+        }:
+            raise ValueError(
+                "profile_film_placement must be one of "
+                "token_pooled/pooled_only/late_token_only/residual, "
+                f"got {profile_film_placement!r}"
+            )
+        self.profile_film_residual_alpha = float(profile_film_residual_alpha)
         self.profile_qkv_scale = float(profile_qkv_scale)
         self.profile_qkv_layers = str(profile_qkv_layers)
+        self.profile_qkv_residual = bool(profile_qkv_residual)
+        self.profile_qkv_mode = str(profile_qkv_mode).lower().strip()
+        if self.profile_qkv_mode not in {"static", "clsa"}:
+            raise ValueError(f"profile_qkv_mode must be one of static/clsa, got {profile_qkv_mode!r}")
+        self.profile_clsa_rank = int(profile_clsa_rank)
+        self.profile_clsa_scale = float(profile_clsa_scale)
+        self.profile_clsa_eta_max = float(profile_clsa_eta_max)
+        self.profile_clsa_gate_init_bias = float(profile_clsa_gate_init_bias)
+        self.profile_clsa_enable_fast_update = bool(profile_clsa_enable_fast_update)
+        self.profile_clsa_loss_weight = float(profile_clsa_loss_weight)
+        self._last_profile_clsa_loss_terms: List[torch.Tensor] = []
         self.decoder_mode = str(decoder_mode).lower().strip()
         if self.decoder_mode not in {"none", "gru", "self_attn", "cross_attn"}:
             raise ValueError(
@@ -402,6 +691,21 @@ class TinyIMU2PressureViT(nn.Module):
         self.rr_tcn_kernel_size = int(rr_tcn_kernel_size)
         self.rr_tcn_dropout = float(dropout if rr_tcn_dropout is None else rr_tcn_dropout)
         self._last_profile_attn_metrics: Dict[str, float] = {}
+        self.use_tcn_token_mixer = bool(use_tcn_token_mixer)
+        self.tcn_mixer_alpha = float(tcn_mixer_alpha)
+        self.tcn_mixer_hidden = int(tcn_mixer_hidden)
+        self.tcn_mixer_layers = int(tcn_mixer_layers)
+        self.raw_tcn_mixer: Optional[ResidualIMUTemporalMixer]
+        if self.use_tcn_token_mixer:
+            self.raw_tcn_mixer = ResidualIMUTemporalMixer(
+                channels=input_channels,
+                hidden=self.tcn_mixer_hidden,
+                layers=self.tcn_mixer_layers,
+                alpha=self.tcn_mixer_alpha,
+                dropout=dropout,
+            )
+        else:
+            self.raw_tcn_mixer = None
 
         self.spec_proj: Optional[nn.Linear] = None
         self.pos = PositionalEncoding(d_model)
@@ -439,6 +743,18 @@ class TinyIMU2PressureViT(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_model, self.pressure_freq_bins),
         )
+
+        self.imu_token_mixer_mode = str(imu_token_mixer).lower().strip()
+        if self.imu_token_mixer_mode not in {"none", "dwconv"}:
+            raise ValueError(
+                f"imu_token_mixer must be one of none/dwconv, got {imu_token_mixer!r}"
+            )
+        self.imu_token_mixer: Optional[DepthwiseTemporalTokenMixer]
+        if self.imu_token_mixer_mode == "dwconv":
+            self.imu_token_mixer = DepthwiseTemporalTokenMixer(d_model, dropout=dropout)
+        else:
+            self.imu_token_mixer = None
+
         if self.rr_head_type == "token_tcn":
             self.rr_head = TokenTCNRRHead(
                 d_model=d_model,
@@ -503,12 +819,30 @@ class TinyIMU2PressureViT(nn.Module):
                     for layer_idx in self.profile_qkv_layer_indices
                 }
             )
+            if self.use_profile_qkv and self.profile_qkv_mode == "clsa":
+                self.profile_clsa_qkv_adapters = nn.ModuleDict(
+                    {
+                        str(layer_idx): ProfileCLSAQKVAdapter(
+                            d_model=d_model,
+                            profile_dim=self.profile_dim,
+                            rank=self.profile_clsa_rank,
+                            scale=self.profile_clsa_scale,
+                            eta_max=self.profile_clsa_eta_max,
+                            hidden_dim=self.profile_hidden_dim,
+                            gate_init_bias=self.profile_clsa_gate_init_bias,
+                        )
+                        for layer_idx in self.profile_qkv_layer_indices
+                    }
+                )
+            else:
+                self.profile_clsa_qkv_adapters = nn.ModuleDict()
         else:
             self.profile_encoder = None
             self.profile_film_tokens = None
             self.profile_film_pooled = None
             self.profile_qkv_layer_indices = []
             self.profile_qkv_conditioners = nn.ModuleDict()
+            self.profile_clsa_qkv_adapters = nn.ModuleDict()
 
     def _resolve_profile_qkv_layer_indices(self, num_layers: int) -> List[int]:
         mode = str(self.profile_qkv_layers).lower().strip()
@@ -555,6 +889,7 @@ class TinyIMU2PressureViT(nn.Module):
         conditioner = None
         if (
             self.use_profile_qkv
+            and self.profile_qkv_mode != "clsa"
             and profile_vector is not None
             and layer_idx is not None
             and str(layer_idx) in self.profile_qkv_conditioners
@@ -569,9 +904,24 @@ class TinyIMU2PressureViT(nn.Module):
             if conditioner is not None:
                 cq, ck, cv = conditioner(profile_vector)
                 scale = float(self.profile_qkv_scale)
-                q = q + scale * cq.unsqueeze(1)
-                k = k + scale * ck.unsqueeze(1)
-                v = v + scale * cv.unsqueeze(1)
+                if bool(self.profile_qkv_residual):
+                    base_attn, _base_weights = layer.self_attn(
+                        x,
+                        x,
+                        x,
+                        attn_mask=None,
+                        key_padding_mask=None,
+                        need_weights=False,
+                        average_attn_weights=False,
+                    )
+                    q = q + cq.unsqueeze(1)
+                    k = k + ck.unsqueeze(1)
+                    v = v + cv.unsqueeze(1)
+                else:
+                    base_attn = None
+                    q = q + scale * cq.unsqueeze(1)
+                    k = k + scale * ck.unsqueeze(1)
+                    v = v + scale * cv.unsqueeze(1)
             x_attn, attn_weights = layer.self_attn(
                 q,
                 k,
@@ -584,6 +934,8 @@ class TinyIMU2PressureViT(nn.Module):
             if attn_weights is not None:
                 nonlocal attn_distance
                 attn_distance = self._mean_temporal_attention_distance(attn_weights.detach())
+            if conditioner is not None and bool(self.profile_qkv_residual):
+                x_attn = base_attn + float(self.profile_qkv_scale) * (x_attn - base_attn)
             return layer.dropout1(x_attn)
 
         def _ff_block(x: torch.Tensor) -> torch.Tensor:
@@ -608,6 +960,8 @@ class TinyIMU2PressureViT(nn.Module):
         b, _, c = x.shape
         if c != self.input_channels:
             raise ValueError(f"Expected {self.input_channels} channels, got {c}")
+        if self.raw_tcn_mixer is not None:
+            x = self.raw_tcn_mixer(x)
 
         x = x.transpose(1, 2)
         window = torch.hann_window(self.win_length, device=x.device)
@@ -694,10 +1048,13 @@ class TinyIMU2PressureViT(nn.Module):
     ) -> torch.Tensor:
         tokens = self._imu_stft_tokens(x)
         h = self.spec_proj(tokens)
+        if self.imu_token_mixer is not None:
+            h = self.imu_token_mixer(h)
         h = self.pos(h)
         self._last_profile_attn_metrics = {}
+        self._last_profile_clsa_loss_terms = []
         mode = str(conditioning_mode or self.profile_conditioning).lower().strip()
-        if mode == "qkv" and profile_vector is not None:
+        if mode in {"qkv", "film_qkv"} and profile_vector is not None:
             profile_vector = self._expand_profile_vector(profile_vector, h.size(0))
             for layer_idx, layer in enumerate(self.encoder.layers):
                 h, attn_distance = self._forward_encoder_layer(
@@ -706,6 +1063,22 @@ class TinyIMU2PressureViT(nn.Module):
                     profile_vector=profile_vector,
                     layer_idx=layer_idx,
                 )
+                if (
+                    self.use_profile_qkv
+                    and self.profile_qkv_mode == "clsa"
+                    and str(layer_idx) in self.profile_clsa_qkv_adapters
+                ):
+                    h, clsa_metrics = self.profile_clsa_qkv_adapters[str(layer_idx)](
+                        h,
+                        profile_vector,
+                        enable_fast_update=bool(self.profile_clsa_enable_fast_update),
+                    )
+                    for name, value in clsa_metrics.items():
+                        if name == "profile_clsa_loss":
+                            self._last_profile_clsa_loss_terms.append(value)
+                        self._last_profile_attn_metrics[f"{name}_layer_{layer_idx}"] = float(
+                            value.detach().float().cpu()
+                        )
                 if attn_distance is not None:
                     self._last_profile_attn_metrics[f"attn_distance_layer_{layer_idx}"] = float(
                         attn_distance.detach().cpu()
@@ -718,6 +1091,11 @@ class TinyIMU2PressureViT(nn.Module):
 
     def last_profile_attention_metrics(self) -> Dict[str, float]:
         return dict(self._last_profile_attn_metrics)
+
+    def last_profile_clsa_loss(self) -> Optional[torch.Tensor]:
+        if not self._last_profile_clsa_loss_terms:
+            return None
+        return torch.stack([x.reshape(()) for x in self._last_profile_clsa_loss_terms]).mean()
 
     def decode_reconstruction(self, h: torch.Tensor) -> torch.Tensor:
         """Decode/refine encoder tokens before pressure-STFT reconstruction."""
@@ -783,22 +1161,47 @@ class TinyIMU2PressureViT(nn.Module):
             profile_vector = self.profile_encoder(profile_stats)
         profile_vector = self._expand_profile_vector(profile_vector, x.size(0))
         mode = str(conditioning_mode or self.profile_conditioning).lower().strip()
-        if mode not in {"film", "qkv"}:
+        if mode in {"qkv_film", "shared_film_qkv", "shared_profile_qkv"}:
+            mode = "film_qkv"
+        if mode not in {"film", "qkv", "film_qkv"}:
             raise ValueError(f"Unsupported conditioning_mode={conditioning_mode!r}")
 
         if mode == "qkv":
             h_cond = self.encode(x, profile_vector=profile_vector, conditioning_mode=mode)
+            h_dec = self.decode_reconstruction(h_cond)
         else:
             if self.profile_film_tokens is None or self.profile_film_pooled is None:
                 raise RuntimeError("Profile FiLM modules are not initialized.")
-            h = self.encode(x)
-            h_cond = self.profile_film_tokens(h, profile_vector)
-        h_dec = self.decode_reconstruction(h_cond)
+            h = self.encode(
+                x,
+                profile_vector=profile_vector if mode == "film_qkv" else None,
+                conditioning_mode="film_qkv" if mode == "film_qkv" else None,
+            )
+            placement = str(self.profile_film_placement)
+            alpha = float(self.profile_film_residual_alpha)
+            if placement == "pooled_only":
+                h_cond = h
+                h_dec = self.decode_reconstruction(h_cond)
+            elif placement == "late_token_only":
+                h_pre_dec = self.decode_reconstruction(h)
+                h_dec = self.profile_film_tokens(h_pre_dec, profile_vector)
+                h_cond = h_dec
+            elif placement == "residual":
+                h_film = self.profile_film_tokens(h, profile_vector)
+                h_cond = h + alpha * (h_film - h)
+                h_dec = self.decode_reconstruction(h_cond)
+            else:
+                h_cond = self.profile_film_tokens(h, profile_vector)
+                h_dec = self.decode_reconstruction(h_cond)
         pressure_logmag = F.softplus(self.pressure_mag_head(h_dec))
 
-        if mode == "film" and self.rr_from == "encoder" and self.rr_head_type == "mlp":
+        if mode in {"film", "film_qkv"} and self.rr_from == "encoder" and self.rr_head_type == "mlp":
             pooled = h_cond.mean(dim=1)
-            pooled = self.profile_film_pooled(pooled, profile_vector)
+            if self.profile_film_placement in {"token_pooled", "pooled_only"}:
+                pooled = self.profile_film_pooled(pooled, profile_vector)
+            elif self.profile_film_placement == "residual":
+                pooled_film = self.profile_film_pooled(pooled, profile_vector)
+                pooled = pooled + float(self.profile_film_residual_alpha) * (pooled_film - pooled)
             rr = self.rr_head(pooled).squeeze(-1)
         else:
             rr = self.predict_rr_from_features(h_cond, h_dec)
@@ -1021,6 +1424,10 @@ def train_one_epoch(model: nn.Module, loader, optimizer, device: str, args, lamb
         if profile_vector is not None and float(getattr(args, "lambda_profile_prior", 0.0)) > 0.0:
             l_profile_prior = (profile_vector.float() ** 2).mean()
             loss = loss + float(args.lambda_profile_prior) * l_profile_prior
+
+        clsa_loss = model.last_profile_clsa_loss() if hasattr(model, "last_profile_clsa_loss") else None
+        if clsa_loss is not None and float(getattr(args, "profile_clsa_loss_weight", 0.0)) > 0.0:
+            loss = loss + float(getattr(args, "profile_clsa_loss_weight", 0.0)) * clsa_loss
 
         loss.backward()
         if args.grad_clip > 0:
@@ -1436,7 +1843,7 @@ def _profile_phase3_enabled(args) -> bool:
         bool(getattr(args, "use_profile_film", False))
         or bool(getattr(args, "use_profile_qkv", False))
         or bool(getattr(args, "use_profile_lora", False))
-        or mode in {"film", "qkv", "lora"}
+        or mode in {"film", "qkv", "film_qkv", "lora"}
     )
 
 
@@ -1581,14 +1988,34 @@ def build_base_parser(default_subjects_list: List[str], default_out_dir: str) ->
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--use-profile-film", action="store_true", help="Enable profile-conditioned FiLM modules for alternate forward paths.")
     parser.add_argument("--use-profile-qkv", action="store_true", help="Enable profile-conditioned Q/K/V modulation inside selected transformer layers.")
+    parser.add_argument("--shared-profile-qkv", action="store_true", help="Use one profile vector for both Profile-FiLM and residual QKV.")
     parser.add_argument("--use-profile-lora", action="store_true", help="Enable profile-conditioned low-rank residual adapters.")
-    parser.add_argument("--profile-conditioning", default="none", choices=["none", "film", "qkv", "lora"], help="Profile-conditioning path to use when profile modules are enabled.")
+    parser.add_argument("--profile-conditioning", default="none", choices=["none", "film", "qkv", "film_qkv", "lora"], help="Profile-conditioning path to use when profile modules are enabled.")
     parser.add_argument("--profile-dim", type=int, default=32)
     parser.add_argument("--profile-stats-dim", type=int, default=0)
     parser.add_argument("--profile-hidden-dim", type=int, default=128)
     parser.add_argument("--profile-film-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--profile-film-placement",
+        default="token_pooled",
+        choices=["token_pooled", "pooled_only", "late_token_only", "residual"],
+        help="Profile-FiLM placement: current token+pooled path, pooled-only, late-token-only, or residual-FiLM.",
+    )
+    parser.add_argument("--profile-film-residual-alpha", type=float, default=0.1)
     parser.add_argument("--profile-qkv-scale", type=float, default=0.1)
     parser.add_argument("--profile-qkv-layers", default="last1", choices=["last1", "last2", "all"])
+    parser.add_argument(
+        "--profile-qkv-residual",
+        action="store_true",
+        help="Blend from unconditioned attention toward profile-QKV attention by --profile-qkv-scale.",
+    )
+    parser.add_argument("--profile-qkv-mode", default="static", choices=["static", "clsa"], help="Profile QKV path: static additive conditioner or embedded CLSA fast adapter.")
+    parser.add_argument("--profile-clsa-rank", type=int, default=8)
+    parser.add_argument("--profile-clsa-scale", type=float, default=0.01)
+    parser.add_argument("--profile-clsa-eta-max", type=float, default=0.1)
+    parser.add_argument("--profile-clsa-gate-init-bias", type=float, default=-2.0)
+    parser.add_argument("--profile-clsa-enable-fast-update", type=int, default=1, help="Enable one-step CLSA fast update inside profile-QKV forward path.")
+    parser.add_argument("--profile-clsa-loss-weight", type=float, default=0.0, help="Optional source-training regularizer on CLSA self-alignment loss. Default 0 keeps it only as fast-update objective.")
     parser.add_argument("--profile-lora-rank", type=int, default=8)
     parser.add_argument("--profile-lora-scale", type=float, default=0.05)
     parser.add_argument("--profile-stats-max-batches", type=int, default=50, help="Max source-train batches to use when estimating fold-level profile-stat normalization; 0 uses all.")
@@ -1644,6 +2071,16 @@ def build_base_parser(default_subjects_list: List[str], default_out_dir: str) ->
         choices=["encoder", "decoder", "both"],
         help="Feature source for RR head. encoder matches the current baseline.",
     )
+    parser.add_argument(
+        "--imu-token-mixer",
+        default="dwconv",
+        choices=["none", "dwconv"],
+        help="Optional depthwise temporal mixer over projected IMU STFT tokens before ViT tokenisation.",
+    )
+    parser.add_argument("--use-tcn-token-mixer", action="store_true", help="Enable a small residual raw-IMU temporal mixer before STFT tokenisation.")
+    parser.add_argument("--tcn-mixer-alpha", type=float, default=0.05)
+    parser.add_argument("--tcn-mixer-hidden", type=int, default=32)
+    parser.add_argument("--tcn-mixer-layers", type=int, default=2)
     parser.add_argument(
         "--rr-head-type",
         default="mlp",
@@ -1733,7 +2170,14 @@ def run_loocv_experiment(
         profile_stats_dim = int(getattr(args, "profile_stats_dim", 0))
         profile_conditioning = str(getattr(args, "profile_conditioning", "none")).lower().strip()
         if profile_conditioning == "none":
-            if bool(getattr(args, "use_profile_lora", False)):
+            if bool(getattr(args, "shared_profile_qkv", False)) or (
+                bool(getattr(args, "use_profile_film", False))
+                and bool(getattr(args, "use_profile_qkv", False))
+            ):
+                profile_conditioning = "film_qkv"
+                setattr(args, "use_profile_film", True)
+                setattr(args, "use_profile_qkv", True)
+            elif bool(getattr(args, "use_profile_lora", False)):
                 profile_conditioning = "lora"
             elif bool(getattr(args, "use_profile_qkv", False)):
                 profile_conditioning = "qkv"
@@ -1752,6 +2196,11 @@ def run_loocv_experiment(
             decoder_mode=str(getattr(args, "decoder_mode", "gru")),
             decoder_layers=int(getattr(args, "decoder_layers", 1)),
             rr_from=str(getattr(args, "rr_from", "encoder")),
+            imu_token_mixer=str(getattr(args, "imu_token_mixer", "dwconv")),
+            use_tcn_token_mixer=bool(getattr(args, "use_tcn_token_mixer", False)),
+            tcn_mixer_alpha=float(getattr(args, "tcn_mixer_alpha", 0.05)),
+            tcn_mixer_hidden=int(getattr(args, "tcn_mixer_hidden", 32)),
+            tcn_mixer_layers=int(getattr(args, "tcn_mixer_layers", 2)),
             rr_head_type=str(getattr(args, "rr_head_type", "mlp")),
             rr_tcn_layers=int(getattr(args, "rr_tcn_layers", 2)),
             rr_tcn_kernel_size=int(getattr(args, "rr_tcn_kernel_size", 3)),
@@ -1763,10 +2212,22 @@ def run_loocv_experiment(
             profile_stats_dim=profile_stats_dim,
             profile_hidden_dim=int(getattr(args, "profile_hidden_dim", 128)),
             profile_film_scale=float(getattr(args, "profile_film_scale", 0.1)),
+            profile_film_placement=str(getattr(args, "profile_film_placement", "token_pooled")),
+            profile_film_residual_alpha=float(
+                getattr(args, "profile_film_residual_alpha", 0.1)
+            ),
             profile_qkv_scale=float(getattr(args, "profile_qkv_scale", 0.1)),
             profile_qkv_layers=str(
                 getattr(args, "profile_qkv_layers", "last1")
             ),
+            profile_qkv_residual=bool(getattr(args, "profile_qkv_residual", False)),
+            profile_qkv_mode=str(getattr(args, "profile_qkv_mode", "static")),
+            profile_clsa_rank=int(getattr(args, "profile_clsa_rank", 8)),
+            profile_clsa_scale=float(getattr(args, "profile_clsa_scale", 0.01)),
+            profile_clsa_eta_max=float(getattr(args, "profile_clsa_eta_max", 0.1)),
+            profile_clsa_gate_init_bias=float(getattr(args, "profile_clsa_gate_init_bias", -2.0)),
+            profile_clsa_enable_fast_update=bool(int(getattr(args, "profile_clsa_enable_fast_update", 1))),
+            profile_clsa_loss_weight=float(getattr(args, "profile_clsa_loss_weight", 0.0)),
         ).to(device)
 
 
