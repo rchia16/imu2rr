@@ -5126,7 +5126,7 @@ def add_common_adaptation_args(parser) -> None:
     )
     _add_argument_if_absent(parser, "--profile-film-residual-alpha", type=float, default=0.1)
     _add_argument_if_absent(parser, "--profile-qkv-scale", type=float, default=0.1)
-    _add_argument_if_absent(parser, "--profile-qkv-layers", default="last1", choices=["last1", "last2", "all"])
+    _add_argument_if_absent(parser, "--profile-qkv-layers", default="last1", choices=["none", "last1", "last2", "all"])
     _add_argument_if_absent(parser, "--profile-qkv-residual", action="store_true")
     _add_argument_if_absent(parser, "--profile-qkv-mode", default="static", choices=["static", "clsa"])
     _add_argument_if_absent(parser, "--profile-clsa-rank", type=int, default=8)

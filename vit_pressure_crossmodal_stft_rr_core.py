@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import random
@@ -55,12 +56,71 @@ def default_subjects(
     )
 
 
+def split_target_calibration_eval(
+    x: np.ndarray,
+    y: np.ndarray,
+    kinematic: Optional[np.ndarray],
+    n_cal: int,
+    *,
+    seed: int,
+    mode: str = "first",
+    exclude_calibration_from_eval: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]:
+    """Split target arrays into calibration and evaluation subsets.
+
+    Returns x_cal, y_cal, k_cal, x_eval, y_eval, k_eval, cal_indices.
+    """
+    n = x.shape[0]
+    n_cal = max(0, min(int(n_cal), n))
+    if n_cal == 0:
+        cal_idx = np.zeros((0,), dtype=np.int64)
+    elif mode == "first":
+        cal_idx = np.arange(n_cal, dtype=np.int64)
+    elif mode == "random":
+        rng = np.random.default_rng(seed)
+        cal_idx = np.sort(rng.choice(np.arange(n), size=n_cal, replace=False))
+    elif mode == "even":
+        cal_idx = np.unique(np.linspace(0, n - 1, n_cal).round().astype(np.int64))
+        if cal_idx.size < n_cal:
+            missing = np.setdiff1d(np.arange(n), cal_idx)
+            cal_idx = np.sort(np.concatenate([cal_idx, missing[: n_cal - cal_idx.size]]))
+    else:
+        raise ValueError(f"Unsupported --target-calibration-mode={mode!r}")
+
+    if exclude_calibration_from_eval and cal_idx.size > 0:
+        mask = np.ones(n, dtype=bool)
+        mask[cal_idx] = False
+        eval_idx = np.where(mask)[0]
+    else:
+        eval_idx = np.arange(n, dtype=np.int64)
+
+    if eval_idx.size == 0:
+        raise RuntimeError(
+            "No target evaluation windows remain. Reduce --target-calibration-windows "
+            "or disable --exclude-calibration-from-eval."
+        )
+
+    k_cal = None if kinematic is None else kinematic[cal_idx]
+    k_eval = None if kinematic is None else kinematic[eval_idx]
+    return x[cal_idx], y[cal_idx], k_cal, x[eval_idx], y[eval_idx], k_eval, cal_idx
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def close_loaders(*loaders) -> None:
+    for loader in loaders:
+        iterator = getattr(loader, "_iterator", None)
+        shutdown = getattr(iterator, "_shutdown_workers", None)
+        if callable(shutdown):
+            shutdown()
+        if hasattr(loader, "_iterator"):
+            loader._iterator = None
 
 
 class PositionalEncoding(nn.Module):
@@ -846,6 +906,8 @@ class TinyIMU2PressureViT(nn.Module):
 
     def _resolve_profile_qkv_layer_indices(self, num_layers: int) -> List[int]:
         mode = str(self.profile_qkv_layers).lower().strip()
+        if mode == "none":
+            return []
         if mode == "last1":
             return [max(0, int(num_layers) - 1)]
         if mode == "last2":
@@ -2003,7 +2065,7 @@ def build_base_parser(default_subjects_list: List[str], default_out_dir: str) ->
     )
     parser.add_argument("--profile-film-residual-alpha", type=float, default=0.1)
     parser.add_argument("--profile-qkv-scale", type=float, default=0.1)
-    parser.add_argument("--profile-qkv-layers", default="last1", choices=["last1", "last2", "all"])
+    parser.add_argument("--profile-qkv-layers", default="last1", choices=["none", "last1", "last2", "all"])
     parser.add_argument(
         "--profile-qkv-residual",
         action="store_true",
@@ -2034,6 +2096,9 @@ def build_base_parser(default_subjects_list: List[str], default_out_dir: str) ->
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--prefetch-factor", type=int, default=1)
+    parser.add_argument("--pin-memory", type=int, default=0)
+    parser.add_argument("--persistent-workers", type=int, default=0)
     parser.add_argument("--resume", action="store_true", help="Resume each subject from last_model.pt in --out-dir when available")
 
     parser.add_argument("--tta", default="none", choices=["none", "physio"], help="Run physiology-aware TTA after loading the best checkpoint.")
@@ -2156,6 +2221,11 @@ def run_loocv_experiment(
         data_group=args.data_group,
         include_tlx=bool(args.include_tlx),
         tlx_csv_path=args.tlx_csv_path,
+        seed=int(args.seed),
+        num_workers=int(getattr(args, "num_workers", 0)),
+        prefetch_factor=int(getattr(args, "prefetch_factor", 1)),
+        pin_memory=bool(getattr(args, "pin_memory", 0)),
+        persistent_workers=bool(getattr(args, "persistent_workers", 0)),
     )
 
     for sbj, train_loader, val_loader, test_loader in generator:
@@ -2254,6 +2324,11 @@ def run_loocv_experiment(
                 if summary_row is not None:
                     print(f"[RESUME] Complete outputs found for {sbj}; reusing summary row.")
                     rows.append(summary_row)
+                    close_loaders(train_loader, val_loader, test_loader)
+                    del train_loader, val_loader, test_loader, model
+                    gc.collect()
+                    if str(device).startswith("cuda") and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     continue
                 print(f"[RESUME] Complete outputs found for {sbj}; summary row missing, rerunning test only.")
                 start_epoch = args.epochs + 1
@@ -2263,6 +2338,11 @@ def run_loocv_experiment(
             if summary_row is not None:
                 print(f"[RESUME] {sbj} already complete through epoch {start_epoch - 1}; reusing summary row.")
                 rows.append(summary_row)
+                close_loaders(train_loader, val_loader, test_loader)
+                del train_loader, val_loader, test_loader, model
+                gc.collect()
+                if str(device).startswith("cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
             print(f"[RESUME] {sbj} training complete; summary row missing, rerunning test only.")
 
@@ -2361,6 +2441,11 @@ def run_loocv_experiment(
             for item in hook(model, sbj, list(args.subjects), train_loader, test_loader, device, args, sbj_dir):
                 name = item.pop("__summary_name__")
                 extra_rows_by_name.setdefault(name, []).append(item)
+        close_loaders(train_loader, val_loader, test_loader)
+        del train_loader, val_loader, test_loader, model
+        gc.collect()
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "summary.csv", index=False)

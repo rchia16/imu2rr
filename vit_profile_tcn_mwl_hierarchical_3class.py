@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Profile-conditioned IMU->RR/STFT with an added TCN Profile-FiLM MWL head
-and 1-minute post-processing.
+Profile-conditioned IMU->RR/STFT with focused 3-class MWL heads and
+1-/2-minute post-processing.
 
 This is intentionally a separate entrypoint. It keeps the existing RR/STFT
 training path unchanged, then adds a downstream mental-workload classifier
@@ -11,25 +11,24 @@ Key points:
   - Backbone/source training is delegated to vit_pressure_crossmodal_stft_rr_core.
   - The MWL head is a small TCN over encoder tokens, with Profile-FiLM on both
     token and pooled features.
-  - Evaluation can use the last-layer profile-QKV episodic TTT path from the
-    latest DCT/QKV runner (e.g. profile_qkv_ttt_sample, last1 by default).
-  - Window outputs are post-processed into non-overlapping 1-minute chunks by
-    averaging class probabilities over consecutive windows.
+  - The target task is rest_low_high:
+      R -> 0, L0/L1 -> 1, L2/L3 -> 2, M excluded.
+  - QKV TTT and HRV fusion are optional ablations, not the default path.
+  - Window outputs are post-processed into non-overlapping 1-/2-minute chunks
+    by averaging class probabilities over consecutive windows.
 
 Example smoke run:
-  python vit_profile_tcn_mwl_qkv_ttt_1min.py \
+  python vit_profile_tcn_mwl_hierarchical_3class.py \
     --subjects S13 S19 S22 S25 \
     --data-str imu_filt \
     --data-group mr \
     --mwl-train-data-group levels \
     --mwl-test-data-group levels \
-    --mwl-task levels \
-    --use-profile-qkv \
-    --profile-conditioning qkv \
-    --profile-qkv-layers last1 \
-    --profile-qkv-scale 0.03 \
-    --mwl-ttt-modes none profile_qkv_ttt_sample \
-    --out-dir results/vit_profile_tcn_mwl_qkv_ttt_1min_smoke
+    --mwl-task rest_low_high \
+    --variants flat_a0 flat_a2 hier_a2 hier_a2_smooth \
+    --postprocess-seconds 60 120 \
+    --mwl-ttt-modes none \
+    --out-dir results/vit_profile_tcn_mwl_hierarchical_3class_smoke
 """
 from __future__ import annotations
 
@@ -624,6 +623,37 @@ def _build_mwl_classification_loaders(
         drop_last=False,
         num_workers=0,
     )
+
+    def _counts_by_subject(split_name: str, sid: Optional[np.ndarray], labels: np.ndarray) -> List[Dict[str, object]]:
+        if sid is None:
+            sid = np.asarray([split_name] * int(labels.shape[0]), dtype=object)
+        labels = np.asarray(labels).astype(int).reshape(-1)
+        sid = np.asarray(sid, dtype=object).reshape(-1)
+        out: List[Dict[str, object]] = []
+        for one_subject in sorted(set(str(v) for v in sid)):
+            mask = sid.astype(str) == str(one_subject)
+            yy = labels[mask]
+            counts = np.bincount(yy, minlength=max(3, len(class_names))).astype(int)
+            row = {
+                "subject": str(one_subject),
+                "split": split_name,
+                "n_rest": int(counts[0]) if counts.size > 0 else 0,
+                "n_low": int(counts[1]) if counts.size > 1 else 0,
+                "n_high": int(counts[2]) if counts.size > 2 else 0,
+                "n_total": int(yy.size),
+                "has_rest": int(counts[0] > 0) if counts.size > 0 else 0,
+                "has_low": int(counts[1] > 0) if counts.size > 1 else 0,
+                "has_high": int(counts[2] > 0) if counts.size > 2 else 0,
+            }
+            out.append(row)
+        return out
+
+    class_counts = []
+    class_counts.extend(_counts_by_subject("source_train", sid_train, cond_train))
+    if x_val is not None and cond_val is not None:
+        class_counts.extend(_counts_by_subject("source_val", sid_val, cond_val))
+    class_counts.extend(_counts_by_subject("target_test", sid_test, cond_test))
+
     meta: Dict[str, object] = {
         "class_names": class_names,
         "class_original_ids": class_original_ids,
@@ -641,6 +671,7 @@ def _build_mwl_classification_loaders(
         "hrv_dim": int(hrv_train.shape[1]),
         "hrv_available_train_ratio": float(np.mean(hrv_train[:, 0] > 0)) if hrv_train.shape[1] else 0.0,
         "hrv_available_test_ratio": float(np.mean(hrv_test[:, 0] > 0)) if hrv_test.shape[1] else 0.0,
+        "class_counts_by_subject": class_counts,
     }
     return train_loader, val_loader, test_loader, meta
 
@@ -1530,6 +1561,646 @@ def mwl_post_eval_hook(model, sbj: str, subjects: List[str], train_loader, test_
     return rows
 
 
+REST_LOW_HIGH_GROUPS = [("rest", [1]), ("low", [2, 3]), ("high", [4, 5])]
+REST_LOW_HIGH_LABELS = (0, 1, 2)
+REST_LOW_HIGH_NAMES = ["0_rest", "1_low", "2_high"]
+
+
+def _parse_variants_3class(text: str) -> List[str]:
+    valid = {"flat_a0", "flat_a2", "hier_a2", "hier_a2_smooth", "hier_a2_qkv_ttt", "hier_a2_hrv"}
+    if isinstance(text, (list, tuple)):
+        names = [str(v).strip() for v in text if str(v).strip()]
+    else:
+        names = _parse_csv_names(text)
+    names = names or ["flat_a0", "flat_a2", "hier_a2", "hier_a2_smooth"]
+    aliases = {
+        "H0": "flat_a0",
+        "H1": "flat_a2",
+        "H2": "hier_a2",
+        "H3": "hier_a2_smooth",
+        "H4": "hier_a2_qkv_ttt",
+        "H5": "hier_a2_hrv",
+    }
+    out = [aliases.get(name, aliases.get(name.upper(), name)) for name in names]
+    bad = [name for name in out if name not in valid]
+    if bad:
+        raise ValueError(f"Unsupported --variants entries {bad}. Valid={sorted(valid)}")
+    return list(dict.fromkeys(out))
+
+
+def _parse_seconds_list(text_or_values) -> List[float]:
+    if isinstance(text_or_values, (list, tuple)):
+        parts = text_or_values
+    else:
+        parts = str(text_or_values or "").replace(",", " ").split()
+    vals = [float(v) for v in parts if str(v).strip()]
+    return vals or [60.0, 120.0]
+
+
+def fixed_label_metrics(y_true, y_pred, labels=(0, 1, 2)) -> Dict[str, object]:
+    labels = tuple(int(v) for v in labels)
+    y = np.asarray(y_true).astype(int).reshape(-1)
+    pred = np.asarray(y_pred).astype(int).reshape(-1)
+    cm = confusion_matrix(y, pred, labels=list(labels))
+    recalls = []
+    for i, _label in enumerate(labels):
+        denom = int(cm[i, :].sum())
+        recalls.append(float(cm[i, i] / denom) if denom > 0 else 0.0)
+    if y.size == 0:
+        acc = float("nan")
+        macro_f1 = float("nan")
+    else:
+        acc = float(accuracy_score(y, pred))
+        macro_f1 = float(f1_score(y, pred, labels=list(labels), average="macro", zero_division=0))
+    return {
+        "accuracy": acc,
+        "balanced_accuracy_fixed": float(np.mean(recalls)) if recalls else float("nan"),
+        "macro_f1_fixed": macro_f1,
+        "rest_recall": recalls[0] if len(recalls) > 0 else float("nan"),
+        "low_recall": recalls[1] if len(recalls) > 1 else float("nan"),
+        "high_recall": recalls[2] if len(recalls) > 2 else float("nan"),
+        "confusion_matrix_3x3": cm,
+    }
+
+
+def _prefixed_fixed_metrics(y_true, y_pred, prefix: str) -> Dict[str, float]:
+    m = fixed_label_metrics(y_true, y_pred, REST_LOW_HIGH_LABELS)
+    return {
+        f"{prefix}_accuracy": float(m["accuracy"]),
+        f"{prefix}_balanced_accuracy_fixed": float(m["balanced_accuracy_fixed"]),
+        f"{prefix}_macro_f1_fixed": float(m["macro_f1_fixed"]),
+        f"{prefix}_rest_recall": float(m["rest_recall"]),
+        f"{prefix}_low_recall": float(m["low_recall"]),
+        f"{prefix}_high_recall": float(m["high_recall"]),
+    }
+
+
+class HierarchicalA2MWLHead(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.num_classes = 3
+        self.feature_head = TinyTCNMWLHead(
+            int(args.d_model),
+            3,
+            hidden_dim=int(args.mwl_tcn_hidden_dim),
+            num_layers=int(args.mwl_tcn_layers),
+            kernel_size=int(args.mwl_tcn_kernel_size),
+            dropout=float(args.mwl_dropout),
+        )
+        dim = int(args.mwl_tcn_hidden_dim)
+        self.rest_load_head = nn.Linear(dim, 2)
+        self.low_high_head = nn.Linear(dim, 2)
+
+    def features(self, hidden: torch.Tensor, profile: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.feature_head.features(hidden, profile)
+
+    def forward(self, hidden: torch.Tensor, profile: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        feat = self.features(hidden, profile)
+        return self.rest_load_head(feat), self.low_high_head(feat)
+
+
+class HierarchicalHRVFusionClassifier(nn.Module):
+    def __init__(self, base_feature_dim: int, hrv_dim: int, hrv_hidden_dim: int = 16, dropout: float = 0.3):
+        super().__init__()
+        self.hrv_branch = nn.Sequential(
+            nn.LayerNorm(int(hrv_dim)),
+            nn.Linear(int(hrv_dim), int(hrv_hidden_dim)),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(int(hrv_hidden_dim), int(hrv_hidden_dim)),
+        )
+        dim = int(base_feature_dim) + int(hrv_hidden_dim)
+        self.rest_load_head = nn.Sequential(nn.LayerNorm(dim), nn.Dropout(float(dropout)), nn.Linear(dim, 2))
+        self.low_high_head = nn.Sequential(nn.LayerNorm(dim), nn.Dropout(float(dropout)), nn.Linear(dim, 2))
+
+    def forward(self, base_feature: torch.Tensor, hrv: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        z = torch.cat([base_feature, self.hrv_branch(hrv.float())], dim=1)
+        return self.rest_load_head(z), self.low_high_head(z)
+
+
+def _hier_probs_from_logits(rest_load_logits: torch.Tensor, low_high_logits: torch.Tensor) -> torch.Tensor:
+    p_rl = torch.softmax(rest_load_logits, dim=1)
+    p_lh = torch.softmax(low_high_logits, dim=1)
+    return torch.stack([p_rl[:, 0], p_rl[:, 1] * p_lh[:, 0], p_rl[:, 1] * p_lh[:, 1]], dim=1)
+
+
+def _class_weights_np(labels: np.ndarray, n_classes: int) -> torch.Tensor:
+    counts = np.bincount(np.asarray(labels).astype(int), minlength=int(n_classes)).astype(np.float32)
+    weights = counts.sum() / np.maximum(counts, 1.0)
+    weights = weights / max(float(weights.mean()), 1e-6)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+def _train_3class_head(
+    model: nn.Module,
+    head: nn.Module,
+    fusion: Optional[nn.Module],
+    loader,
+    val_loader,
+    device: str,
+    args,
+    *,
+    hierarchical: bool,
+) -> Dict[str, float]:
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    head.to(device).train()
+    if fusion is not None:
+        fusion.to(device).train()
+    params = list(head.parameters()) + ([] if fusion is None else list(fusion.parameters()))
+    opt = torch.optim.AdamW(params, lr=float(args.mwl_lr), weight_decay=float(args.mwl_weight_decay))
+
+    labels_np = []
+    for batch in loader:
+        _imu, _pressure, y, _br, _hrv = _unpack_mwl_batch(batch, device)
+        labels_np.append(y.detach().cpu().numpy())
+    y_train_np = np.concatenate(labels_np) if labels_np else np.zeros((0,), dtype=int)
+    class_weight_3 = _class_weights_np(y_train_np, 3).to(device)
+    rl_weight = _class_weights_np((y_train_np != 0).astype(int), 2).to(device)
+    lh_train = y_train_np[y_train_np != 0] - 1
+    lh_weight = _class_weights_np(lh_train, 2).to(device)
+
+    def _forward_probs(hidden, profile, hrv):
+        if hierarchical:
+            feat = head.features(hidden, profile)
+            if fusion is None:
+                rest_load_logits, low_high_logits = head.rest_load_head(feat), head.low_high_head(feat)
+            else:
+                rest_load_logits, low_high_logits = fusion(feat, hrv)
+            probs = _hier_probs_from_logits(rest_load_logits, low_high_logits)
+            return probs, rest_load_logits, low_high_logits
+        logits = _mwl_logits(head, hidden, profile, hrv, fusion)
+        return torch.softmax(logits, dim=1), logits, None
+
+    def _loss_from_outputs(y, probs, logits_a, logits_b):
+        if not hierarchical:
+            return F.cross_entropy(logits_a, y, weight=class_weight_3)
+        y_rest_load = (y != 0).long()
+        loss_rl = F.cross_entropy(logits_a, y_rest_load, weight=rl_weight)
+        load_mask = y != 0
+        if bool(load_mask.any()):
+            y_low_high = (y[load_mask] - 1).long()
+            loss_lh = F.cross_entropy(logits_b[load_mask], y_low_high, weight=lh_weight)
+        else:
+            loss_lh = torch.zeros((), device=device)
+        return loss_rl + float(getattr(args, "lambda_low_high", 1.0)) * loss_lh
+
+    @torch.no_grad()
+    def _score(split_loader, prefix: str) -> Dict[str, float]:
+        head.eval()
+        if fusion is not None:
+            fusion.eval()
+        losses, preds, labels = [], [], []
+        for batch in split_loader:
+            imu, _pressure, y, _br, hrv = _unpack_mwl_batch(batch, device)
+            hidden, profile = _forward_source_profile_hidden(model, imu, device)
+            probs, logits_a, logits_b = _forward_probs(hidden, profile, hrv)
+            losses.append(float(_loss_from_outputs(y, probs, logits_a, logits_b).detach().cpu()))
+            preds.append(probs.argmax(dim=1).detach().cpu().numpy())
+            labels.append(y.detach().cpu().numpy())
+        yy = np.concatenate(labels) if labels else np.array([], dtype=int)
+        pp = np.concatenate(preds) if preds else np.array([], dtype=int)
+        out = {f"{prefix}_loss": float(np.mean(losses)) if losses else float("nan")}
+        out.update(_prefixed_fixed_metrics(yy, pp, prefix))
+        return out
+
+    monitor_alias = {
+        "val_macro_f1": "val_macro_f1_fixed",
+        "val_f1_macro": "val_macro_f1_fixed",
+        "val_balanced_accuracy": "val_balanced_accuracy_fixed",
+        "val_balanced_acc": "val_balanced_accuracy_fixed",
+        "val_acc": "val_accuracy",
+    }
+    monitor = monitor_alias.get(str(getattr(args, "mwl_monitor", "val_macro_f1_fixed")), str(getattr(args, "mwl_monitor", "val_macro_f1_fixed")))
+    maximize = not monitor.endswith("_loss")
+    best_score = -float("inf") if maximize else float("inf")
+    best_epoch = 0
+    best_state = None
+    stale_epochs = 0
+    history = []
+    for epoch in range(1, int(args.mwl_epochs) + 1):
+        head.train()
+        if fusion is not None:
+            fusion.train()
+        losses, preds, labels = [], [], []
+        for batch in loader:
+            imu, _pressure, y, _br, hrv = _unpack_mwl_batch(batch, device)
+            with torch.no_grad():
+                hidden, profile = _forward_source_profile_hidden(model, imu, device)
+            probs, logits_a, logits_b = _forward_probs(hidden, profile, hrv)
+            loss = _loss_from_outputs(y, probs, logits_a, logits_b)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            if float(args.mwl_grad_clip) > 0.0:
+                torch.nn.utils.clip_grad_norm_(params, float(args.mwl_grad_clip))
+            opt.step()
+            losses.append(float(loss.detach().cpu()))
+            preds.append(probs.detach().argmax(dim=1).cpu().numpy())
+            labels.append(y.detach().cpu().numpy())
+        yy = np.concatenate(labels) if labels else np.array([], dtype=int)
+        pp = np.concatenate(preds) if preds else np.array([], dtype=int)
+        row = {"epoch": int(epoch), "loss": float(np.mean(losses)) if losses else float("nan")}
+        row.update(_prefixed_fixed_metrics(yy, pp, "train"))
+        if val_loader is not None:
+            row.update(_score(val_loader, "val"))
+        else:
+            row.update({k: float("nan") for k in ["val_loss", "val_accuracy", "val_balanced_accuracy_fixed", "val_macro_f1_fixed"]})
+        current = float(row.get(monitor, float("nan")))
+        improved = math.isfinite(current) and (current > best_score if maximize else current < best_score)
+        if improved:
+            best_score = current
+            best_epoch = int(epoch)
+            stale_epochs = 0
+            best_state = {
+                "head": {k: v.detach().cpu().clone() for k, v in head.state_dict().items()},
+                "fusion": None if fusion is None else {k: v.detach().cpu().clone() for k, v in fusion.state_dict().items()},
+            }
+        else:
+            stale_epochs += 1
+        history.append(row)
+        if epoch == 1 or epoch == int(args.mwl_epochs) or epoch % max(1, int(args.mwl_log_every)) == 0:
+            print(
+                f"[MWL_3C] epoch={epoch} loss={row['loss']:.4f} "
+                f"train_f1={row['train_macro_f1_fixed']:.4f} val_f1={row['val_macro_f1_fixed']:.4f}"
+            )
+        if bool(getattr(args, "mwl_early_stop", True)) and val_loader is not None and stale_epochs >= int(getattr(args, "mwl_patience", 8)):
+            print(f"[MWL_3C] early_stop epoch={epoch} best_epoch={best_epoch} {monitor}={best_score:.4f}")
+            break
+    if best_state is not None:
+        head.load_state_dict({k: v.to(device) for k, v in best_state["head"].items()}, strict=True)
+        if fusion is not None and best_state["fusion"] is not None:
+            fusion.load_state_dict({k: v.to(device) for k, v in best_state["fusion"].items()}, strict=True)
+    last = dict(history[-1]) if history else {}
+    best_row = next((row for row in history if int(row["epoch"]) == best_epoch), {})
+    out = dict(last)
+    out.update({f"best_{k}": v for k, v in best_row.items() if k != "epoch"})
+    out["best_epoch"] = int(best_epoch)
+    out["best_monitor"] = monitor
+    out["best_monitor_value"] = float(best_score) if math.isfinite(best_score) else float("nan")
+    out["epochs_ran"] = int(len(history))
+    return out
+
+
+def _predict_3class_mode(
+    model: nn.Module,
+    head: nn.Module,
+    fusion: Optional[nn.Module],
+    rr_model: Optional[FaithfulRRRegressor],
+    loader,
+    mode: str,
+    device: str,
+    args,
+    *,
+    hierarchical: bool,
+    rest_threshold: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame, Dict[str, np.ndarray]]:
+    model.eval()
+    head.eval()
+    if fusion is not None:
+        fusion.eval()
+    source_state = _state_dict_cpu_clone(model)
+    probs_all, labels_all, pred_all = [], [], []
+    rl_probs_all, lh_probs_all = [], []
+    batch_rows = []
+    for bi, batch in enumerate(loader):
+        _restore_state_dict(model, source_state, device)
+        for p in model.parameters():
+            p.requires_grad = False
+        imu, _pressure, y_t, _br, hrv = _unpack_mwl_batch(batch, device)
+        y = y_t.detach().cpu().numpy()
+        hidden_base, profile_base = _forward_source_profile_hidden(model, imu, device)
+        with torch.no_grad():
+            if hierarchical:
+                feat_base = head.features(hidden_base, profile_base)
+                if fusion is None:
+                    rl_base, lh_base = head.rest_load_head(feat_base), head.low_high_head(feat_base)
+                else:
+                    rl_base, lh_base = fusion(feat_base, hrv)
+                probs_base = _hier_probs_from_logits(rl_base, lh_base)
+            else:
+                logits_base = _mwl_logits(head, hidden_base, profile_base, hrv, fusion)
+                probs_base = torch.softmax(logits_base, dim=1)
+        if mode == "none":
+            hidden, profile = hidden_base, profile_base
+            diag = {"profile_delta_norm": 0.0, "hidden_delta_norm": 0.0, "hidden_delta_rms": 0.0}
+        else:
+            if rr_model is None:
+                raise RuntimeError("MWL profile TTT mode requires a trained RR probe.")
+            hidden, profile, diag = _adapt_profile_and_get_hidden(model, rr_model, imu, mode, device, args)
+        with torch.no_grad():
+            if hierarchical:
+                feat = head.features(hidden, profile)
+                if fusion is None:
+                    rl_logits, lh_logits = head.rest_load_head(feat), head.low_high_head(feat)
+                else:
+                    rl_logits, lh_logits = fusion(feat, hrv)
+                probs_t = _hier_probs_from_logits(rl_logits, lh_logits)
+                rl_probs = torch.softmax(rl_logits, dim=1).detach().cpu().numpy()
+                lh_probs = torch.softmax(lh_logits, dim=1).detach().cpu().numpy()
+            else:
+                logits = _mwl_logits(head, hidden, profile, hrv, fusion)
+                probs_t = torch.softmax(logits, dim=1)
+                rl_probs = np.full((int(y.shape[0]), 2), np.nan, dtype=np.float32)
+                lh_probs = np.full((int(y.shape[0]), 2), np.nan, dtype=np.float32)
+        probs = probs_t.detach().cpu().numpy()
+        pred = probs.argmax(axis=1).astype(int)
+        if rest_threshold is not None and hierarchical:
+            load_pred = 1 + np.argmax(probs[:, 1:3], axis=1)
+            pred = np.where(probs[:, 0] >= float(rest_threshold), 0, load_pred).astype(int)
+        base_pred = probs_base.detach().argmax(dim=1).cpu().numpy().astype(int)
+        probs_all.append(probs)
+        pred_all.append(pred)
+        labels_all.append(y)
+        rl_probs_all.append(rl_probs)
+        lh_probs_all.append(lh_probs)
+        prob_delta = probs_t.detach() - probs_base.detach()
+        batch_rows.append(
+            {
+                "batch_index": int(bi),
+                "mode": str(mode),
+                "n_batch": int(len(y)),
+                "profile_delta_norm": float(diag.get("profile_delta_norm", 0.0)),
+                "hidden_delta_norm": float(diag.get("hidden_delta_norm", 0.0)),
+                "hidden_delta_rms": float(diag.get("hidden_delta_rms", 0.0)),
+                "logit_delta_norm": float("nan"),
+                "prob_delta_norm": float(prob_delta.norm(p=2).cpu()),
+                "pred_changed_rate": float(np.mean(pred != base_pred)) if len(pred) else 0.0,
+            }
+        )
+    _restore_state_dict(model, source_state, device)
+    y_np = np.concatenate(labels_all, axis=0) if labels_all else np.array([], dtype=int)
+    pred_np = np.concatenate(pred_all, axis=0) if pred_all else np.array([], dtype=int)
+    prob_np = np.concatenate(probs_all, axis=0) if probs_all else np.zeros((0, 3), dtype=np.float32)
+    aux = {
+        "rest_load_probs": np.concatenate(rl_probs_all, axis=0) if rl_probs_all else np.zeros((0, 2), dtype=np.float32),
+        "low_high_probs": np.concatenate(lh_probs_all, axis=0) if lh_probs_all else np.zeros((0, 2), dtype=np.float32),
+    }
+    return y_np, pred_np, prob_np, pd.DataFrame(batch_rows), aux
+
+
+def _postprocess_chunks_3class(y_true: np.ndarray, prob: np.ndarray, *, seconds: float, window_shift_seconds: float):
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    prob = np.asarray(prob, dtype=np.float32)
+    windows_per_chunk = max(1, int(round(float(seconds) / max(1e-6, float(window_shift_seconds)))))
+    rows, y_chunk, pred_chunk, prob_chunk = [], [], [], []
+    for chunk_id, st in enumerate(range(0, y_true.size, windows_per_chunk)):
+        en = min(y_true.size, st + windows_per_chunk)
+        yy = y_true[st:en]
+        pp = prob[st:en]
+        p_mean = pp.mean(axis=0)
+        counts = np.bincount(yy, minlength=3)
+        tied = np.flatnonzero(counts == counts.max())
+        if len(tied) > 1:
+            y_maj = int(yy[len(yy) // 2])
+            tie = 1
+        else:
+            y_maj = int(tied[0])
+            tie = 0
+        pred = int(p_mean.argmax())
+        y_chunk.append(y_maj)
+        pred_chunk.append(pred)
+        prob_chunk.append(p_mean)
+        rows.append(
+            {
+                "chunk_id": int(chunk_id),
+                "start_window": int(st),
+                "end_window": int(en - 1),
+                "n_windows": int(en - st),
+                "true_label": int(y_maj),
+                "pred_label": int(pred),
+                "tie_true_label": int(tie),
+                "p_rest": float(p_mean[0]),
+                "p_low": float(p_mean[1]),
+                "p_high": float(p_mean[2]),
+            }
+        )
+    return np.asarray(y_chunk, dtype=int), np.asarray(pred_chunk, dtype=int), np.vstack(prob_chunk).astype(np.float32) if prob_chunk else np.zeros((0, 3), dtype=np.float32), pd.DataFrame(rows)
+
+
+def _save_confusion_3class(out_dir: Path, subject: str, variant: str, scope: str, y: np.ndarray, pred: np.ndarray) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cm = confusion_matrix(y, pred, labels=list(REST_LOW_HIGH_LABELS))
+    pd.DataFrame(cm, index=REST_LOW_HIGH_NAMES, columns=REST_LOW_HIGH_NAMES).to_csv(out_dir / f"{subject}__{variant}__{scope}.csv")
+    denom = np.maximum(cm.sum(axis=1, keepdims=True), 1)
+    pd.DataFrame(cm.astype(float) / denom, index=REST_LOW_HIGH_NAMES, columns=REST_LOW_HIGH_NAMES).to_csv(
+        out_dir / f"{subject}__{variant}__{scope}_normalized.csv"
+    )
+
+
+def _rest_threshold_from_val(model, head, fusion, val_loader, device, args, hierarchical: bool) -> float:
+    mode = str(getattr(args, "rest_threshold", "argmax")).lower().strip()
+    if mode != "auto" or val_loader is None or not hierarchical:
+        return float("nan")
+    y, _pred, prob, _batch_df, _aux = _predict_3class_mode(
+        model, head, fusion, None, val_loader, "none", device, args, hierarchical=hierarchical, rest_threshold=None
+    )
+    best_t, best_score = 0.5, -1.0
+    for t in np.linspace(0.05, 0.95, 19):
+        load_pred = 1 + np.argmax(prob[:, 1:3], axis=1)
+        pred = np.where(prob[:, 0] >= float(t), 0, load_pred).astype(int)
+        score = float(fixed_label_metrics(y, pred)["macro_f1_fixed"])
+        if score > best_score:
+            best_score, best_t = score, float(t)
+    return best_t
+
+
+def mwl_post_eval_hook(model, sbj: str, subjects: List[str], train_loader, test_loader, device: str, args, sbj_dir: Path):
+    if not bool(getattr(args, "run_mwl_head", True)):
+        return []
+    if str(getattr(args, "mwl_task", "rest_low_high")) != "rest_low_high":
+        raise ValueError("vit_profile_tcn_mwl_hierarchical_3class.py only supports --mwl-task rest_low_high")
+    _warm_lazy_modules(model, train_loader, device)
+    full_subjects = list(getattr(args, "full_subjects_for_loso", None) or subjects)
+    variants = _parse_variants_3class(getattr(args, "variants", ""))
+    postprocess_seconds = _parse_seconds_list(getattr(args, "postprocess_seconds", getattr(args, "mwl_postprocess_seconds", "60 120")))
+    modes = _parse_modes(args.mwl_ttt_modes)
+    default_mode = "none"
+    rr_model = None
+    if any(("qkv" in v) for v in variants) or any(m != "none" for m in modes):
+        if any(m != "none" for m in modes):
+            rr_model = _train_rr_probe_for_ttt(model, train_loader, device, args)
+    qkv_scale_diag = _apply_qkv_effective_scale(model, args)
+    chunk_dir = Path(args.out_dir) / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    confusion_dir = Path(args.out_dir) / "confusion_matrices"
+    rows, window_rows, one_min_rows, two_min_rows, ttt_rows, count_rows = [], [], [], [], [], []
+
+    for variant in variants:
+        hierarchical = variant.startswith("hier")
+        head_variant = "A0" if variant == "flat_a0" else "A2"
+        hrv_mode = "none"
+        use_fusion_requested = False
+        eval_modes = [default_mode]
+        if variant == "hier_a2_qkv_ttt":
+            eval_modes = [m for m in modes if m != "none"] or ["profile_qkv_ttt_sample"]
+        if variant == "hier_a2_hrv":
+            use_fusion_requested = bool(getattr(args, "use_hrv_fusion", False))
+            hrv_modes = [m for m in _parse_hrv_feature_modes(str(getattr(args, "hrv_feature_modes", "none"))) if m != "none"]
+            hrv_mode = hrv_modes[0] if hrv_modes else str(getattr(args, "hrv_feature_mode", "hr_hrv_relative"))
+
+        cls_train_loader, cls_val_loader, cls_test_loader, cls_meta = _build_mwl_classification_loaders(
+            subject=sbj,
+            subjects=full_subjects,
+            data_str=args.data_str,
+            batch_size=int(args.mwl_batch_size),
+            data_dir=str(args.data_dir),
+            train_data_group="mr_levels",
+            test_data_group="mr_levels",
+            task="mr_levels",
+            include_levels_in_train=True,
+            class_subset="",
+            class_groups=REST_LOW_HIGH_GROUPS,
+            val_subjects=int(getattr(args, "mwl_val_subjects", 3)),
+            seed=int(getattr(args, "seed", 0)),
+            hrv_feature_mode=hrv_mode,
+            hrv_input_source=str(getattr(args, "hrv_input_source", "auto")),
+            hrv_min_valid_ratio=float(getattr(args, "hrv_min_valid_ratio", 0.5)),
+        )
+        count_rows.extend([{**r, "variant": variant} for r in cls_meta.get("class_counts_by_subject", [])])
+        use_fusion = bool(use_fusion_requested and hrv_mode != "none" and int(cls_meta["hrv_dim"]) > 0)
+        if hierarchical:
+            head = HierarchicalA2MWLHead(args).to(device)
+            fusion = None
+            if use_fusion:
+                fusion = HierarchicalHRVFusionClassifier(
+                    int(args.mwl_tcn_hidden_dim),
+                    int(cls_meta["hrv_dim"]),
+                    hrv_hidden_dim=int(getattr(args, "hrv_hidden_dim", 16)),
+                    dropout=float(getattr(args, "hrv_dropout", 0.3)),
+                ).to(device)
+        else:
+            head = _build_mwl_head(head_variant, args, 3).to(device)
+            fusion = None
+            if use_fusion:
+                fusion = HRVFusionClassifier(
+                    _mwl_head_feature_dim(head_variant, args),
+                    int(cls_meta["hrv_dim"]),
+                    3,
+                    hrv_hidden_dim=int(getattr(args, "hrv_hidden_dim", 16)),
+                    dropout=float(getattr(args, "hrv_dropout", 0.3)),
+                ).to(device)
+        train_last = _train_3class_head(model, head, fusion, cls_train_loader, cls_val_loader, device, args, hierarchical=hierarchical)
+        selected_threshold = _rest_threshold_from_val(model, head, fusion, cls_val_loader, device, args, hierarchical)
+        threshold_for_pred = selected_threshold if math.isfinite(selected_threshold) else None
+
+        for mode in eval_modes:
+            effective_mode = str(mode)
+            y, pred, prob, batch_df, aux = _predict_3class_mode(
+                model, head, fusion, rr_model, cls_test_loader, effective_mode, device, args, hierarchical=hierarchical, rest_threshold=threshold_for_pred
+            )
+            if not set(np.unique(y).astype(int)).issubset({0, 1, 2}):
+                raise RuntimeError(f"Unexpected labels after rest_low_high mapping: {sorted(set(np.unique(y).astype(int)))}")
+            _save_confusion_3class(confusion_dir, sbj, variant, "window", y, pred)
+            chunk_outputs = {}
+            for seconds in postprocess_seconds:
+                scope = "one_min" if int(round(seconds)) == 60 else "two_min" if int(round(seconds)) == 120 else f"{int(round(seconds))}s"
+                y_c, pred_c, prob_c, chunk_df = _postprocess_chunks_3class(
+                    y, prob, seconds=seconds, window_shift_seconds=float(args.mwl_window_shift_seconds)
+                )
+                _save_confusion_3class(confusion_dir, sbj, variant, scope, y_c, pred_c)
+                chunk_outputs[scope] = (y_c, pred_c, prob_c, chunk_df, seconds)
+
+            target_counts = np.bincount(y, minlength=3)
+            row = {
+                "__summary_name__": "mwl_diagnostic_summary",
+                "subject": sbj,
+                "variant": variant,
+                "head": "hierarchical_a2" if hierarchical else {"A0": "flat_a0", "A2": "flat_a2"}[head_variant],
+                "mode": effective_mode,
+                "mwl_task": "rest_low_high",
+                "hrv_feature_mode": hrv_mode,
+                "use_hrv_fusion": int(use_fusion),
+                "window_shift_seconds": float(args.mwl_window_shift_seconds),
+                "postprocess_seconds": " ".join(str(int(s)) if float(s).is_integer() else str(s) for s in postprocess_seconds),
+                "best_epoch": int(train_last.get("best_epoch", 0)),
+                "best_val_accuracy": float(train_last.get("best_val_accuracy", float("nan"))),
+                "best_val_balanced_accuracy_fixed": float(train_last.get("best_val_balanced_accuracy_fixed", float("nan"))),
+                "best_val_macro_f1_fixed": float(train_last.get("best_val_macro_f1_fixed", float("nan"))),
+                "train_accuracy": float(train_last.get("train_accuracy", float("nan"))),
+                "train_macro_f1_fixed": float(train_last.get("train_macro_f1_fixed", float("nan"))),
+                "selected_rest_threshold": float(selected_threshold) if math.isfinite(selected_threshold) else float("nan"),
+                "target_has_rest": int(target_counts[0] > 0),
+                "target_has_low": int(target_counts[1] > 0),
+                "target_has_high": int(target_counts[2] > 0),
+                "target_has_all_classes": int(np.all(target_counts[:3] > 0)),
+                "mwl_train_subjects": " ".join(str(v) for v in cls_meta["train_subjects"]),
+                "mwl_val_subjects": " ".join(str(v) for v in cls_meta["val_subjects"]),
+                "mwl_uses_source_subject_validation": int(cls_meta["uses_source_subject_validation"]),
+                **_prefixed_fixed_metrics(y, pred, "window"),
+                **qkv_scale_diag,
+            }
+            for scope, (y_c, pred_c, _prob_c, _chunk_df, seconds) in chunk_outputs.items():
+                prefix = scope
+                row.update(_prefixed_fixed_metrics(y_c, pred_c, prefix))
+                row[f"{scope}_windows_per_chunk"] = int(round(float(seconds) / max(1e-6, float(args.mwl_window_shift_seconds))))
+            rows.append(row)
+
+            rl = aux["rest_load_probs"]
+            lh = aux["low_high_probs"]
+            for i in range(y.size):
+                window_rows.append(
+                    {
+                        "subject": sbj,
+                        "variant": variant,
+                        "head": row["head"],
+                        "mode": effective_mode,
+                        "sample_index": int(i),
+                        "true_label": int(y[i]),
+                        "pred_label": int(pred[i]),
+                        "p_rest": float(prob[i, 0]),
+                        "p_low": float(prob[i, 1]),
+                        "p_high": float(prob[i, 2]),
+                        "p_rest_load_rest": float(rl[i, 0]) if rl.size else float("nan"),
+                        "p_rest_load_load": float(rl[i, 1]) if rl.size else float("nan"),
+                        "p_low_high_low": float(lh[i, 0]) if lh.size else float("nan"),
+                        "p_low_high_high": float(lh[i, 1]) if lh.size else float("nan"),
+                        "condition_original": ["R", "low_L0_L1", "high_L2_L3"][int(y[i])],
+                        "chunk_id_optional": int(i),
+                        "hrv_feature_mode": hrv_mode,
+                    }
+                )
+            for scope, (_y_c, _pred_c, _prob_c, chunk_df, _seconds) in chunk_outputs.items():
+                chunk_df = chunk_df.copy()
+                chunk_df.insert(0, "mode", effective_mode)
+                chunk_df.insert(0, "head", row["head"])
+                chunk_df.insert(0, "variant", variant)
+                chunk_df.insert(0, "subject", sbj)
+                chunk_df["hrv_feature_mode"] = hrv_mode
+                if scope == "one_min":
+                    one_min_rows.extend(chunk_df.to_dict(orient="records"))
+                elif scope == "two_min":
+                    two_min_rows.extend(chunk_df.to_dict(orient="records"))
+            if not batch_df.empty:
+                batch_df = batch_df.copy()
+                batch_df.insert(0, "subject", sbj)
+                batch_df.insert(1, "variant", variant)
+                ttt_rows.extend(batch_df.to_dict(orient="records"))
+            print(
+                f"[MWL_3C] subject={sbj} variant={variant} mode={effective_mode} "
+                f"win_f1={row['window_macro_f1_fixed']:.4f} two_min_f1={row.get('two_min_macro_f1_fixed', float('nan')):.4f}"
+            )
+
+    if rows:
+        df = pd.DataFrame([{k: v for k, v in row.items() if not str(k).startswith("__")} for row in rows])
+        df.to_csv(chunk_dir / f"{sbj}_summary.csv", index=False)
+        df.to_csv(chunk_dir / f"{sbj}_mwl_diagnostic_summary.csv", index=False)
+        present = df[df["target_has_all_classes"] == 1].copy()
+        if not present.empty:
+            present.to_csv(chunk_dir / f"{sbj}_summary_all_classes_present.csv", index=False)
+    if count_rows:
+        pd.DataFrame(count_rows).drop_duplicates().to_csv(chunk_dir / f"{sbj}_class_counts_by_subject.csv", index=False)
+    if window_rows:
+        pd.DataFrame(window_rows).to_csv(chunk_dir / f"{sbj}_mwl_predictions_window.csv", index=False)
+    if one_min_rows:
+        pd.DataFrame(one_min_rows).to_csv(chunk_dir / f"{sbj}_mwl_predictions_one_min.csv", index=False)
+    if two_min_rows:
+        pd.DataFrame(two_min_rows).to_csv(chunk_dir / f"{sbj}_mwl_predictions_two_min.csv", index=False)
+    if ttt_rows:
+        pd.DataFrame(ttt_rows).to_csv(chunk_dir / f"{sbj}_mwl_ttt_batches.csv", index=False)
+    return rows
+
+
 def add_mwl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--eval-subjects",
@@ -1541,7 +2212,7 @@ def add_mwl_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument("--run-mwl-head", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mwl-task", default="mr_levels", choices=list(TASK_CHOICES))
+    parser.add_argument("--mwl-task", default="rest_low_high", choices=sorted(set(TASK_CHOICES) | {"rest_low_high"}))
     parser.add_argument("--mwl-train-data-group", default="levels", choices=["mr", "levels", "mr_levels"])
     parser.add_argument("--mwl-test-data-group", default="levels", choices=["mr", "levels", "mr_levels"])
     parser.add_argument("--mwl-include-levels-in-train", action=argparse.BooleanOptionalAction, default=True)
@@ -1560,7 +2231,8 @@ def add_mwl_args(parser: argparse.ArgumentParser) -> None:
         default="A0,A1,A2",
         help="Comma-separated simple heads: A0 pooled linear, A1 pooled MLP, A2 tiny no-profile TCN.",
     )
-    parser.add_argument("--mwl-ttt-modes", default="none profile_qkv_ttt_sample")
+    parser.add_argument("--variants", nargs="+", default=["flat_a0", "flat_a2", "hier_a2", "hier_a2_smooth"])
+    parser.add_argument("--mwl-ttt-modes", default="none")
     parser.add_argument("--mwl-batch-size", type=int, default=64)
     parser.add_argument("--mwl-epochs", type=int, default=100)
     parser.add_argument("--mwl-lr", type=float, default=3e-4)
@@ -1575,9 +2247,26 @@ def add_mwl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mwl-early-stop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mwl-val-subjects", type=int, default=3)
     parser.add_argument("--mwl-patience", type=int, default=8)
-    parser.add_argument("--mwl-monitor", default="val_f1_macro", choices=["val_f1_macro", "val_balanced_acc", "val_acc", "val_loss"])
+    parser.add_argument(
+        "--mwl-monitor",
+        default="val_macro_f1_fixed",
+        choices=[
+            "val_macro_f1_fixed",
+            "val_balanced_accuracy_fixed",
+            "val_macro_f1",
+            "val_f1_macro",
+            "val_balanced_accuracy",
+            "val_balanced_acc",
+            "val_accuracy",
+            "val_acc",
+            "val_loss",
+        ],
+    )
+    parser.add_argument("--lambda-low-high", type=float, default=1.0)
+    parser.add_argument("--rest-threshold", default="argmax", help="Use 'auto' to tune rest threshold on source-validation subjects.")
+    parser.add_argument("--postprocess-seconds", nargs="+", default=["60", "120"])
     parser.add_argument("--mwl-postprocess-seconds", type=float, default=60.0)
-    parser.add_argument("--mwl-window-shift-seconds", type=float, default=1.0)
+    parser.add_argument("--mwl-window-shift-seconds", type=float, default=30.0)
     parser.add_argument("--use-hrv-fusion", action="store_true")
     parser.add_argument("--hrv-feature-mode", choices=["none", "hr_only", "hrv_basic", "hr_hrv_absolute", "hr_hrv_relative", "hr_hrv_absolute_plus_relative"], default="none")
     parser.add_argument(
@@ -1650,7 +2339,7 @@ def config_mutator(args) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = build_base_parser(SUBJECTS, "vit_profile_tcn_mwl_qkv_ttt_1min")
+    parser = build_base_parser(SUBJECTS, "vit_profile_tcn_mwl_hierarchical_3class")
     add_common_adaptation_args(parser)
     add_ttt_args(parser)
     add_mwl_args(parser)

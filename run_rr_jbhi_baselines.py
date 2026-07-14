@@ -11,8 +11,10 @@ signal from dataset as cross-modal target, and br as RR target.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
+import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -23,9 +25,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 
-from dataloader import loocv_generator, normalize_data_group
+from dataloader import loocv_generator
 from evaluations import simple_regression_metrics
-from utils import _filter_subjects_with_data
 from rr_jbhi_models import make_model, RRForward
 
 
@@ -35,6 +36,39 @@ DEFAULT_MODELS = "resnet1d cnn_gru tcn inceptiontime stft_cnn patchtst crossmoda
 
 def parse_list(text: str) -> List[str]:
     return [t.strip() for t in str(text).replace(",", " ").split() if t.strip()]
+
+
+def subjects_with_data(subjects: List[str], data_dir: str, data_group: str) -> List[str]:
+    group = str(data_group or "").strip().lower()
+    bases = [Path(data_dir)]
+    if group and group not in {"none", "all", "root"}:
+        bases = [Path(data_dir) / group, Path(data_dir)]
+
+    out = []
+    for subject in subjects:
+        if any((base / f"{subject}.pkl").exists() for base in bases):
+            out.append(subject)
+        else:
+            print(f"[DATA] skipping missing subject {subject} under {[str(base) for base in bases]}", flush=True)
+    return out
+
+
+def close_loaders(*loaders) -> None:
+    for loader in loaders:
+        iterator = getattr(loader, "_iterator", None)
+        shutdown = getattr(iterator, "_shutdown_workers", None)
+        if callable(shutdown):
+            shutdown()
+        if hasattr(loader, "_iterator"):
+            loader._iterator = None
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def unpack_batch(batch, device: torch.device):
@@ -151,10 +185,11 @@ def save_predictions(path: Path, subject: str, mode: str, out: Dict[str, np.ndar
 
 
 def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    subjects = _filter_subjects_with_data(parse_list(args.subjects), args.data_dir, data_group=args.data_group)
+    subjects = subjects_with_data(parse_list(args.subjects), args.data_dir, args.data_group)
     rows, pred_rows = [], []
     model_root = Path(args.out_dir) / model_name
     model_root.mkdir(parents=True, exist_ok=True)
+    set_seed(int(args.seed))
 
     for subject, train_loader, val_loader, test_loader in loocv_generator(
         subjects,
@@ -166,6 +201,11 @@ def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame
         data_dir=args.data_dir,
         mdl_dir=args.mdl_dir,
         data_group=args.data_group,
+        seed=int(args.seed),
+        num_workers=int(args.num_workers),
+        prefetch_factor=int(args.prefetch_factor),
+        pin_memory=bool(args.pin_memory),
+        persistent_workers=bool(args.persistent_workers),
     ):
         print(f"\n[MODEL={model_name}] [LOSO={subject}]", flush=True)
         sample_x, *_ = next(iter(train_loader))
@@ -200,6 +240,7 @@ def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame
                 "model": model_name,
                 "subject": subject,
                 "mode": mode,
+                "seed": int(args.seed),
                 "mae": float(met.get("mae", np.nan)),
                 "rmse": float(met.get("rmse", np.nan)),
                 "corr": float(met.get("corr", np.nan)),
@@ -211,13 +252,20 @@ def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame
         torch.save(model.state_dict(), fold_dir / f"model_{model_name}_{subject}.pt")
         with open(fold_dir / f"train_history_{model_name}_{subject}.json", "w") as f:
             json.dump(train_info["history"], f, indent=2)
+        close_loaders(train_loader, val_loader, test_loader)
+        del train_loader, val_loader, test_loader, model
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     subject_df = pd.DataFrame(rows)
     summary_df = subject_df.groupby(["model", "mode"], as_index=False).agg(
         mae_mean=("mae", "mean"), mae_std=("mae", "std"),
-        rmse_mean=("rmse", "mean"), corr_mean=("corr", "mean"),
+        rmse_mean=("rmse", "mean"), rmse_std=("rmse", "std"),
+        corr_mean=("corr", "mean"), corr_std=("corr", "std"),
         n_subjects=("subject", "nunique"),
     )
+    summary_df["seed"] = int(args.seed)
     subject_df.to_csv(model_root / "subject_rows.csv", index=False)
     summary_df.to_csv(model_root / "summary.csv", index=False)
     return subject_df, summary_df
@@ -242,7 +290,12 @@ def main():
     p.add_argument("--emb-dim", type=int, default=128)
     p.add_argument("--recon-weight", type=float, default=0.15)
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval-alpha075", action="store_true", default=True)
+    p.add_argument("--num-workers", type=int, default=int(os.environ.get("IMU_DATALOADER_WORKERS", "0")))
+    p.add_argument("--prefetch-factor", type=int, default=int(os.environ.get("IMU_DATALOADER_PREFETCH", "1")))
+    p.add_argument("--pin-memory", type=int, default=int(os.environ.get("IMU_DATALOADER_PIN_MEMORY", "0")))
+    p.add_argument("--persistent-workers", type=int, default=int(os.environ.get("IMU_DATALOADER_PERSISTENT_WORKERS", "0")))
     args = p.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)

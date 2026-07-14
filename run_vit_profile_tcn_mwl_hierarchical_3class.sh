@@ -1,44 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-GPU LOSO scheduler for the separate MWL experiment:
+# Multi-GPU LOSO scheduler for the focused 3-class MWL experiment:
 #   IMU -> RR/STFT profile-conditioned source model
-#   + TCN Profile-FiLM mental-workload classification head
-#   + episodic last-layer profile-QKV TTT
-#   + non-overlapping 1-minute post-processing of MWL probabilities
+#   + flat and hierarchical Rest/Low/High MWL heads
+#   + non-overlapping 1-/2-minute post-processing of MWL probabilities
 #
 # Default smoke/full use:
 #   DEBUG=1 DEVICES="cuda:0" SUBJECTS="S13 S19 S22 S25" \
-#     bash run_vit_profile_tcn_mwl_qkv_ttt_1min.sh
+#     bash run_vit_profile_tcn_mwl_hierarchical_3class.sh
 #
-#   DEVICES="cuda:0 cuda:1" EXPERIMENT_SET=qkv_sample \
-#     bash run_vit_profile_tcn_mwl_qkv_ttt_1min.sh
-#
-# Main presets:
-#   EXPERIMENT_SET=qkv_sample      -> none + profile_qkv_ttt_sample
-#   EXPERIMENT_SET=qkv_batch       -> none + profile_qkv_ttt_batch
-#   EXPERIMENT_SET=qkv_compare     -> none + sample + batch
-#   EXPERIMENT_SET=qkv_cal_gated   -> none + sample, with QKV calibration gate
-#   EXPERIMENT_SET=film_sample     -> none + profile_film_ttt_sample
-#   EXPERIMENT_SET=film_batch      -> none + profile_film_ttt_batch
-#   EXPERIMENT_SET=film_compare    -> none + sample + batch
+#   DEVICES="cuda:0 cuda:1" bash run_vit_profile_tcn_mwl_hierarchical_3class.sh
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-SCRIPT="${SCRIPT:-vit_profile_tcn_mwl_qkv_ttt_1min.py}"
+SCRIPT="${SCRIPT:-vit_profile_tcn_mwl_hierarchical_3class.py}"
 ROOT_DIR="${ROOT_DIR:-/projects/BLVMob/imu-rr-seated}"
 RESULT_DIR_USER="${RESULT_DIR:-}"
 TIMESTAMP_SUFFIX="${TIMESTAMP_SUFFIX:-$(date -u +%Y%m%dT%H%M%SZ)}"
-RESULT_DIR_BASE="${RESULT_DIR_BASE:-${ROOT_DIR}/results/vit_profile_tcn_mwl_qkv_ttt_1min}"
+RESULT_DIR_BASE="${RESULT_DIR_BASE:-${ROOT_DIR}/results/vit_profile_tcn_mwl_hierarchical_3class}"
 
 # shellcheck disable=SC2206
 DEVICES=(${DEVICES:-cuda:0 cuda:1})
 DATA_STR="${DATA_STR:-imu_filt}"
-DATA_GROUP="${DATA_GROUP:-mr}"
+DATA_GROUP="${DATA_GROUP:-mr_levels}"
 DATA_DIR="${DATA_DIR:-${ROOT_DIR}/Data}"
 MDL_DIR="${MDL_DIR:-${ROOT_DIR}/models/${DATA_STR}/loocv}"
 SEED="${SEED:-0}"
 DEBUG="${DEBUG:-0}"
-EXPERIMENT_SET="${EXPERIMENT_SET:-qkv_sample}"
+EXPERIMENT_SET="${EXPERIMENT_SET:-rest_low_high}"
 
 # Source RR/STFT model training defaults.
 EPOCHS="${EPOCHS:-20}"
@@ -60,7 +49,7 @@ LAMBDA_CONTRAST="${LAMBDA_CONTRAST:-0.05}"
 CONTRAST_WARMUP_EPOCHS="${CONTRAST_WARMUP_EPOCHS:-5}"
 CONTRAST_RAMP_END_EPOCH="${CONTRAST_RAMP_END_EPOCH:-10}"
 
-# Profile-conditioning defaults. Last-layer QKV is intentional here.
+# Profile-conditioning defaults. QKV is optional for ablations only.
 PROFILE_DIM="${PROFILE_DIM:-32}"
 PROFILE_HIDDEN_DIM="${PROFILE_HIDDEN_DIM:-128}"
 PROFILE_FILM_SCALE="${PROFILE_FILM_SCALE:-0.1}"
@@ -106,32 +95,37 @@ TARGET_CALIBRATION_WINDOWS="${TARGET_CALIBRATION_WINDOWS:-32}"
 TARGET_CALIBRATION_MODE="${TARGET_CALIBRATION_MODE:-first}"
 EXCLUDE_CALIBRATION_FROM_EVAL="${EXCLUDE_CALIBRATION_FROM_EVAL:-1}"
 
-# MWL downstream classification defaults.
-MWL_TASK="${MWL_TASK:-mr_levels}"
+MWL_TASK="${MWL_TASK:-rest_low_high}"
 MWL_TRAIN_DATA_GROUP="${MWL_TRAIN_DATA_GROUP:-mr_levels}"
 MWL_TEST_DATA_GROUP="${MWL_TEST_DATA_GROUP:-mr_levels}"
 MWL_INCLUDE_LEVELS_IN_TRAIN="${MWL_INCLUDE_LEVELS_IN_TRAIN:-1}"
 MWL_CLASS_SUBSET="${MWL_CLASS_SUBSET:-}"
-MWL_DIAGNOSTIC_TASKS="${MWL_DIAGNOSTIC_TASKS:-levels,binary_low_high,rest_vs_load}"
-MWL_HEAD_VARIANTS="${MWL_HEAD_VARIANTS:-A0,A1,A2}"
+VARIANTS="${VARIANTS:-flat_a0 flat_a2 hier_a2 hier_a2_smooth}"
+POSTPROCESS_SECONDS="${POSTPROCESS_SECONDS:-60 120}"
+MWL_DIAGNOSTIC_TASKS="${MWL_DIAGNOSTIC_TASKS:-rest_low_high}"
+MWL_HEAD_VARIANTS="${MWL_HEAD_VARIANTS:-A0,A2}"
+MWL_TTT_MODES="${MWL_TTT_MODES:-none}"
 MWL_BATCH_SIZE="${MWL_BATCH_SIZE:-64}"
 MWL_EPOCHS="${MWL_EPOCHS:-100}"
 MWL_LR="${MWL_LR:-3e-4}"
 MWL_WEIGHT_DECAY="${MWL_WEIGHT_DECAY:-1e-2}"
 MWL_TCN_HIDDEN_DIM="${MWL_TCN_HIDDEN_DIM:-32}"
 MWL_TCN_LAYERS="${MWL_TCN_LAYERS:-1}"
-MWL_TCN_KERNEL_SIZE="${MWL_TCN_KERNEL_SIZE:-9}" # 3
+MWL_TCN_KERNEL_SIZE="${MWL_TCN_KERNEL_SIZE:-3}"
 MWL_DROPOUT="${MWL_DROPOUT:-0.4}"
 MWL_PROFILE_FILM_SCALE="${MWL_PROFILE_FILM_SCALE:-0.1}"
 MWL_EARLY_STOP="${MWL_EARLY_STOP:-1}"
 MWL_VAL_SUBJECTS="${MWL_VAL_SUBJECTS:-3}"
-MWL_PATIENCE="${MWL_PATIENCE:-10}"
-MWL_MONITOR="${MWL_MONITOR:-val_f1_macro}"
+MWL_PATIENCE="${MWL_PATIENCE:-8}"
+MWL_MONITOR="${MWL_MONITOR:-val_macro_f1_fixed}"
 MWL_POSTPROCESS_SECONDS="${MWL_POSTPROCESS_SECONDS:-60}"
 MWL_WINDOW_SHIFT_SECONDS="${MWL_WINDOW_SHIFT_SECONDS:-30}"
+LAMBDA_LOW_HIGH="${LAMBDA_LOW_HIGH:-1.0}"
+REST_THRESHOLD="${REST_THRESHOLD:-argmax}"
 
 # Optional HR/HRV late-fusion branch for focused MWL diagnostics.
-USE_HRV_FUSION="${USE_HRV_FUSION:-0}"
+USE_HRV="${USE_HRV:-0}"
+USE_HRV_FUSION="${USE_HRV_FUSION:-$USE_HRV}"
 HRV_FEATURE_MODE="${HRV_FEATURE_MODE:-none}"
 HRV_FEATURE_MODES="${HRV_FEATURE_MODES:-none}"
 HRV_HIDDEN_DIM="${HRV_HIDDEN_DIM:-16}"
@@ -139,7 +133,7 @@ HRV_DROPOUT="${HRV_DROPOUT:-0.3}"
 HRV_NORMALIZATION="${HRV_NORMALIZATION:-target_relative}"
 HRV_MIN_VALID_RATIO="${HRV_MIN_VALID_RATIO:-0.5}"
 HRV_INPUT_SOURCE="${HRV_INPUT_SOURCE:-auto}"
-SAVE_CONFUSION_MATRICES="${SAVE_CONFUSION_MATRICES:-0}"
+SAVE_CONFUSION_MATRICES="${SAVE_CONFUSION_MATRICES:-1}"
 SAVE_TTT_DIAGNOSTICS="${SAVE_TTT_DIAGNOSTICS:-0}"
 
 # Full LOSO source cohort used in the current profile encoder experiments.
@@ -155,40 +149,6 @@ else
   RUN_SUBJECTS=("${FULL_SUBJECTS[@]}")
 fi
 
-case "$EXPERIMENT_SET" in
-  qkv_sample)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_qkv_ttt_sample}"
-    ;;
-  qkv_batch)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_qkv_ttt_batch}"
-    TTT_BATCH_SIZE="${TTT_BATCH_SIZE:-8}"
-    ;;
-  qkv_compare)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_qkv_ttt_sample profile_qkv_ttt_batch}"
-    ;;
-  qkv_cal_gated)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_qkv_ttt_sample}"
-    PROFILE_QKV_CALIBRATION_GATE=1
-    ;;
-  binary_hrv_focus)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_qkv_ttt_sample}"
-    ;;
-  film_sample)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_film_ttt_sample}"
-    ;;
-  film_batch)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_film_ttt_batch}"
-    TTT_BATCH_SIZE="${TTT_BATCH_SIZE:-8}"
-    ;;
-  film_compare)
-    MWL_TTT_MODES="${MWL_TTT_MODES:-none profile_film_ttt_sample profile_film_ttt_batch}"
-    ;;
-  *)
-    echo "[ERROR] Unknown EXPERIMENT_SET=${EXPERIMENT_SET}" >&2
-    exit 2
-    ;;
-esac
-
 if [ -n "$RESULT_DIR_USER" ]; then
   RESULT_DIR="$RESULT_DIR_USER"
 else
@@ -199,7 +159,7 @@ mkdir -p "$LOG_ROOT" "$RESULT_DIR"
 
 if [ ! -f "$SCRIPT" ]; then
   echo "[ERROR] Script not found: $SCRIPT" >&2
-  echo "[HINT] Run from the repo root, copy the script there, or set SCRIPT=/path/to/vit_profile_tcn_mwl_qkv_ttt_1min.py" >&2
+  echo "[HINT] Run from the repo root, copy the script there, or set SCRIPT=/path/to/vit_profile_tcn_mwl_hierarchical_3class.py" >&2
   exit 1
 fi
 
@@ -305,6 +265,7 @@ build_common_args() {
     --mwl-class-subset "$MWL_CLASS_SUBSET"
     --mwl-diagnostic-tasks "$MWL_DIAGNOSTIC_TASKS"
     --mwl-head-variants "$MWL_HEAD_VARIANTS"
+    --variants $VARIANTS
     --mwl-ttt-modes "$MWL_TTT_MODES"
     --mwl-batch-size "$MWL_BATCH_SIZE"
     --mwl-epochs "$MWL_EPOCHS"
@@ -319,7 +280,10 @@ build_common_args() {
     --mwl-patience "$MWL_PATIENCE"
     --mwl-monitor "$MWL_MONITOR"
     --mwl-postprocess-seconds "$MWL_POSTPROCESS_SECONDS"
+    --postprocess-seconds $POSTPROCESS_SECONDS
     --mwl-window-shift-seconds "$MWL_WINDOW_SHIFT_SECONDS"
+    --lambda-low-high "$LAMBDA_LOW_HIGH"
+    --rest-threshold "$REST_THRESHOLD"
     --hrv-feature-mode "$HRV_FEATURE_MODE"
     --hrv-feature-modes "$HRV_FEATURE_MODES"
     --hrv-hidden-dim "$HRV_HIDDEN_DIM"
@@ -392,6 +356,7 @@ write_manifest() {
     echo "mwl_class_subset=$MWL_CLASS_SUBSET"
     echo "mwl_diagnostic_tasks=$MWL_DIAGNOSTIC_TASKS"
     echo "mwl_head_variants=$MWL_HEAD_VARIANTS"
+    echo "variants=$VARIANTS"
     echo "mwl_ttt_modes=$MWL_TTT_MODES"
     echo "mwl_early_stop=$MWL_EARLY_STOP"
     echo "mwl_val_subjects=$MWL_VAL_SUBJECTS"
@@ -399,8 +364,10 @@ write_manifest() {
     echo "mwl_monitor=$MWL_MONITOR"
     echo "profile_qkv_layers=$PROFILE_QKV_LAYERS"
     echo "profile_qkv_scale=$PROFILE_QKV_SCALE"
-    echo "mwl_postprocess_seconds=$MWL_POSTPROCESS_SECONDS"
+    echo "postprocess_seconds=$POSTPROCESS_SECONDS"
     echo "mwl_window_shift_seconds=$MWL_WINDOW_SHIFT_SECONDS"
+    echo "lambda_low_high=$LAMBDA_LOW_HIGH"
+    echo "rest_threshold=$REST_THRESHOLD"
     echo "use_hrv_fusion=$USE_HRV_FUSION"
     echo "hrv_feature_modes=$HRV_FEATURE_MODES"
     echo "hrv_input_source=$HRV_INPUT_SOURCE"
@@ -457,6 +424,41 @@ if [ "$FAILED" -ne 0 ]; then
   echo "[DONE_WITH_ERRORS] result_dir=$RESULT_DIR" >&2
   exit 1
 fi
+
+RESULT_DIR="$RESULT_DIR" "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+import pandas as pd
+
+root = Path(os.environ["RESULT_DIR"])
+chunk_dir = root / "chunks"
+for name in [
+    "summary",
+    "mwl_diagnostic_summary",
+    "mwl_predictions_window",
+    "mwl_predictions_one_min",
+    "mwl_predictions_two_min",
+    "class_counts_by_subject",
+    "mwl_ttt_batches",
+]:
+    files = sorted(chunk_dir.glob(f"*_{name}.csv"))
+    if name == "summary":
+        files = [
+            f for f in files
+            if not f.name.endswith("_mwl_diagnostic_summary.csv")
+            and not f.name.endswith("_summary_all_classes_present.csv")
+        ]
+    if files:
+        pd.concat([pd.read_csv(f) for f in files], ignore_index=True).to_csv(root / f"{name}.csv", index=False)
+
+summary_path = root / "summary.csv"
+if summary_path.exists():
+    df = pd.read_csv(summary_path)
+    if "target_has_all_classes" in df:
+        present = df[df["target_has_all_classes"] == 1].copy()
+        if not present.empty:
+            present.to_csv(root / "summary_all_classes_present.csv", index=False)
+PY
 
 echo "[DONE] result_dir=$RESULT_DIR"
 echo "[DONE] logs=$LOG_ROOT"
