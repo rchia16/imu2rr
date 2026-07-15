@@ -78,6 +78,27 @@ class BinAffineDistribution(nn.Module):
         return torch.softmax(logits * self.scale.view(1, -1) + self.bias.view(1, -1), dim=1)
 
 
+class BasisDistributionReadout(nn.Module):
+    def __init__(self, n_bins: int, n_basis: int = 10):
+        super().__init__()
+        self.n_bins = int(n_bins)
+        self.n_basis = int(n_basis)
+        x = torch.linspace(-1.0, 1.0, self.n_bins)
+        centers = torch.linspace(-1.0, 1.0, self.n_basis)
+        width = max(2.0 / max(self.n_basis - 1, 1), 1e-6)
+        basis = torch.exp(-0.5 * ((x.view(-1, 1) - centers.view(1, -1)) / width).pow(2))
+        basis = basis / basis.sum(dim=0, keepdim=True).clamp_min(1e-8)
+        self.register_buffer("basis", basis)
+        self.log_scale_coef = nn.Parameter(torch.zeros(self.n_basis))
+        self.bias_coef = nn.Parameter(torch.zeros(self.n_basis))
+
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        log_scale = self.basis @ self.log_scale_coef
+        bias = self.basis @ self.bias_coef
+        calibrated = logits * torch.exp(log_scale).view(1, -1) + bias.view(1, -1)
+        return torch.softmax(calibrated, dim=1)
+
+
 class HiddenLinear(nn.Module):
     def __init__(self, d_in: int):
         super().__init__()
@@ -272,7 +293,10 @@ def train_distribution_method(
     args: argparse.Namespace,
 ) -> Tuple[BinAffineDistribution, List[Dict[str, Any]]]:
     device = torch.device(args.device)
-    model = BinAffineDistribution(train["spectral_logits"].shape[1]).to(device)
+    if bool(getattr(args, "fixed_a1_20_param", False)) and method in {"A1_gaussian_kl", "A3_kl_rr_mae"}:
+        model = BasisDistributionReadout(train["spectral_logits"].shape[1], n_basis=10).to(device)
+    else:
+        model = BinAffineDistribution(train["spectral_logits"].shape[1]).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=float(args.learning_rate), weight_decay=float(args.weight_decay))
     x = torch.as_tensor(train["spectral_logits"], device=device).float()
     y = torch.as_tensor(train["rr_true"], device=device).float()
@@ -998,6 +1022,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--corrective", action="store_true", help="Run compact corrective A/B/C method set and fixed-A1 Phase C base.")
     parser.add_argument("--audit-a0", action="store_true", help="Write A0 decoder audit from identical cached spectral tensors.")
+    parser.add_argument("--fixed-a1-20-param", action="store_true", help="Use a 10-basis scale/bias spectral readout for A1/A3 with exactly 20 trainable parameters.")
     parser.add_argument("--val-split", type=float, default=0.25)
     parser.add_argument("--soft-temperature", type=float, default=0.1)
     parser.add_argument("--target-sigma-bpm", type=float, default=1.0)

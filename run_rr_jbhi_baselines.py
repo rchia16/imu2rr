@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 
-from dataloader import loocv_generator
+from dataloader import build_loocv_loaders
 from evaluations import simple_regression_metrics
 from rr_jbhi_models import make_model, RRForward
 
@@ -69,6 +69,10 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def make_fold_seed(base_seed: int, subject: str) -> int:
+    return int(int(base_seed) * 1000 + int(str(subject).lstrip("S")))
 
 
 def unpack_batch(batch, device: torch.device):
@@ -171,9 +175,7 @@ def collect_outputs(model: nn.Module, loader, device: torch.device, alpha_mean=N
 def evaluate_loader(model: nn.Module, loader, device: torch.device, alpha_mean=None) -> Dict[str, float]:
     out = collect_outputs(model, loader, device, alpha_mean=alpha_mean)
     m = simple_regression_metrics(out["true"], out["pred"])
-    return {"mae": float(m.get("mae", np.mean(np.abs(out["true"] - out["pred"])))),
-            "rmse": float(m.get("rmse", np.sqrt(np.mean((out["true"] - out["pred"]) ** 2)))),
-            "corr": float(m.get("corr", np.nan))}
+    return {"mae": float(m["mae"]), "rmse": float(m["rmse"]), "corr": float(m["corr"])}
 
 
 def save_predictions(path: Path, subject: str, mode: str, out: Dict[str, np.ndarray]):
@@ -191,22 +193,26 @@ def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame
     model_root.mkdir(parents=True, exist_ok=True)
     set_seed(int(args.seed))
 
-    for subject, train_loader, val_loader, test_loader in loocv_generator(
-        subjects,
-        args.data_str,
-        val_split=args.val_split,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=False,
-        data_dir=args.data_dir,
-        mdl_dir=args.mdl_dir,
-        data_group=args.data_group,
-        seed=int(args.seed),
-        num_workers=int(args.num_workers),
-        prefetch_factor=int(args.prefetch_factor),
-        pin_memory=bool(args.pin_memory),
-        persistent_workers=bool(args.persistent_workers),
-    ):
+    for subject in subjects:
+        fold_seed = make_fold_seed(int(args.seed), subject)
+        set_seed(fold_seed)
+        train_loader, val_loader, test_loader = build_loocv_loaders(
+            subject,
+            subjects,
+            args.data_str,
+            val_split=args.val_split,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=False,
+            data_dir=args.data_dir,
+            mdl_dir=args.mdl_dir,
+            data_group=args.data_group,
+            seed=fold_seed,
+            num_workers=int(args.num_workers),
+            prefetch_factor=int(args.prefetch_factor),
+            pin_memory=bool(args.pin_memory),
+            persistent_workers=bool(args.persistent_workers),
+        )
         print(f"\n[MODEL={model_name}] [LOSO={subject}]", flush=True)
         sample_x, *_ = next(iter(train_loader))
         x0 = ensure_channel_first(sample_x.float())
@@ -241,9 +247,11 @@ def run_model(model_name: str, args, device: torch.device) -> Tuple[pd.DataFrame
                 "subject": subject,
                 "mode": mode,
                 "seed": int(args.seed),
-                "mae": float(met.get("mae", np.nan)),
-                "rmse": float(met.get("rmse", np.nan)),
-                "corr": float(met.get("corr", np.nan)),
+                "base_seed": int(args.seed),
+                "fold_seed": int(fold_seed),
+                "mae": float(met["mae"]),
+                "rmse": float(met["rmse"]),
+                "corr": float(met["corr"]),
                 "n": int(out["true"].shape[0]),
                 "best_val_mae": float(train_info["best_val_mae"]),
                 "epochs_ran": int(train_info["epochs_ran"]),
@@ -291,7 +299,7 @@ def main():
     p.add_argument("--recon-weight", type=float, default=0.15)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--eval-alpha075", action="store_true", default=True)
+    p.add_argument("--eval-alpha075", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--num-workers", type=int, default=int(os.environ.get("IMU_DATALOADER_WORKERS", "0")))
     p.add_argument("--prefetch-factor", type=int, default=int(os.environ.get("IMU_DATALOADER_PREFETCH", "1")))
     p.add_argument("--pin-memory", type=int, default=int(os.environ.get("IMU_DATALOADER_PIN_MEMORY", "0")))

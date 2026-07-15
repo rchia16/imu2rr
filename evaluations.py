@@ -121,10 +121,12 @@ def simple_regression_metrics(
 ) -> Dict[str, float]:
     ev = Evaluation(y_true, y_pred)
     out = ev.get_evals()
+    corr = float(out["pearsonr_coeff"])
     return {
         "mae": float(out["mae"]),
         "rmse": float(out["rmse"]),
-        "pearsonr": float(out["pearsonr_coeff"]),
+        "corr": corr,
+        "pearsonr": corr,
     }
 
 if __name__ == '__main__':

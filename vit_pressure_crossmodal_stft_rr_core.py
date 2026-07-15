@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import json
 import math
 import random
@@ -24,7 +25,7 @@ from torch.nn import (
 
 
 from utils import _filter_subjects_with_data
-from dataloader import loocv_generator
+from dataloader import build_loocv_loaders
 from config import BR_FS, SBJ_PROCESSED_DIR, M_DIR
 from vit_pressure_crossmodal_profile_encoder import (
     PatientProfileEncoder,
@@ -113,6 +114,11 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def make_fold_seed(base_seed: int, subject: str) -> int:
+    subject_number = int(str(subject).lstrip("S"))
+    return int(int(base_seed) * 1000 + subject_number)
+
+
 def close_loaders(*loaders) -> None:
     for loader in loaders:
         iterator = getattr(loader, "_iterator", None)
@@ -121,6 +127,25 @@ def close_loaders(*loaders) -> None:
             shutdown()
         if hasattr(loader, "_iterator"):
             loader._iterator = None
+
+
+def _state_dict_cpu_clone(model: nn.Module) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _state_dict_matches(model: nn.Module, reference: Dict[str, torch.Tensor]) -> bool:
+    current = model.state_dict()
+    if set(current.keys()) != set(reference.keys()):
+        return False
+    for key, ref in reference.items():
+        if not torch.equal(current[key].detach().cpu(), ref):
+            return False
+    return True
+
+
+def _restore_model_state(model: nn.Module, reference: Dict[str, torch.Tensor], device: str) -> None:
+    model.load_state_dict(reference, strict=True)
+    model.to(device)
 
 
 class PositionalEncoding(nn.Module):
@@ -1914,6 +1939,8 @@ def _collect_phase3_profile_metadata(
     train_loader,
     device: str,
     args,
+    *,
+    apply_to_model: bool = False,
 ) -> Dict[str, object]:
     if not _profile_phase3_enabled(args):
         return {}
@@ -1931,7 +1958,8 @@ def _collect_phase3_profile_metadata(
     source_profile_mean = normalizer["source_profile_mean"].detach().cpu()
     source_profile_std = normalizer["source_profile_std"].detach().cpu()
     source_profile_stats_norm = normalizer["source_profile_stats_norm"].detach().cpu()
-    _set_model_profile_normalizer(model, source_profile_mean, source_profile_std)
+    if bool(apply_to_model):
+        _set_model_profile_normalizer(model, source_profile_mean, source_profile_std)
     latent_dim = int(getattr(model, "d_model", 0))
     split_stats = split_profile_stats(source_profile_stats, latent_dim)
     diag = profile_stats_diagnostics(
@@ -1947,6 +1975,7 @@ def _collect_phase3_profile_metadata(
             "raw_profile_stats_rr_delta_mean_bpm": float(split_stats["rr_delta_mean"].item()),
             "raw_profile_stats_stft_confidence_mean": float(split_stats["stft_confidence_mean"].item()),
             "profile_stats_max_batches": int(max_batches if max_batches > 0 else 0),
+            "profile_normalizer_applied_to_model": int(bool(apply_to_model)),
         }
     )
     return {
@@ -2209,27 +2238,34 @@ def run_loocv_experiment(
 
     rows: List[Dict[str, float]] = []
     extra_rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
-    generator = loocv_generator(
-        args.subjects,
-        args.data_str,
-        batch_size=args.batch_size,
-        shuffle=True,
-        drop_last=False,
-        data_dir=args.data_dir,
-        mdl_dir=args.mdl_dir,
-        autoencoder=None,
-        data_group=args.data_group,
-        include_tlx=bool(args.include_tlx),
-        tlx_csv_path=args.tlx_csv_path,
-        seed=int(args.seed),
-        num_workers=int(getattr(args, "num_workers", 0)),
-        prefetch_factor=int(getattr(args, "prefetch_factor", 1)),
-        pin_memory=bool(getattr(args, "pin_memory", 0)),
-        persistent_workers=bool(getattr(args, "persistent_workers", 0)),
-    )
 
-    for sbj, train_loader, val_loader, test_loader in generator:
+    for sbj in list(args.subjects):
         print(f"\n=== Held-out subject {sbj} ===")
+        fold_seed = make_fold_seed(int(args.seed), str(sbj))
+        set_seed(fold_seed)
+        setattr(args, "base_seed", int(args.seed))
+        setattr(args, "fold_seed", int(fold_seed))
+        setattr(args, "calibration_seed", int(fold_seed))
+        train_loader, val_loader, test_loader = build_loocv_loaders(
+            sbj,
+            args.subjects,
+            args.data_str,
+            val_split=getattr(args, "val_split", 0.25),
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=False,
+            data_dir=args.data_dir,
+            mdl_dir=args.mdl_dir,
+            autoencoder=None,
+            data_group=args.data_group,
+            include_tlx=bool(args.include_tlx),
+            tlx_csv_path=args.tlx_csv_path,
+            seed=fold_seed,
+            num_workers=int(getattr(args, "num_workers", 0)),
+            prefetch_factor=int(getattr(args, "prefetch_factor", 1)),
+            pin_memory=bool(getattr(args, "pin_memory", 0)),
+            persistent_workers=bool(getattr(args, "persistent_workers", 0)),
+        )
         sbj_dir = out_dir / sbj
         sbj_dir.mkdir(parents=True, exist_ok=True)
         best_path = sbj_dir / "best_model.pt"
@@ -2386,7 +2422,13 @@ def run_loocv_experiment(
 
         ckpt = torch.load(best_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
-        profile_ckpt_metadata = _collect_phase3_profile_metadata(model, train_loader, device, args)
+        profile_ckpt_metadata = _collect_phase3_profile_metadata(
+            model,
+            train_loader,
+            device,
+            args,
+            apply_to_model=False,
+        )
         if profile_ckpt_metadata:
             best_payload = dict(ckpt)
             best_payload.update(profile_ckpt_metadata)
@@ -2396,6 +2438,7 @@ def run_loocv_experiment(
                 last_payload = dict(last_ckpt)
                 last_payload.update(profile_ckpt_metadata)
                 torch.save(last_payload, last_path)
+        pristine_post_eval_state = _state_dict_cpu_clone(model)
         test_pre = evaluate(model, test_loader, device, args, save_arrays=sbj_dir / "pre_tta")
         print(f"TEST_PRE_TTA {sbj}: {test_pre}")
 
@@ -2415,7 +2458,13 @@ def run_loocv_experiment(
             print(f"TEST_POST_TTA {sbj}: {test}")
 
         _ = evaluate(model, test_loader, device, args, save_arrays=sbj_dir)
-        row = {"subject": sbj, **test}
+        row = {
+            "subject": sbj,
+            "base_seed": int(getattr(args, "base_seed", args.seed)),
+            "fold_seed": int(getattr(args, "fold_seed", fold_seed)),
+            "calibration_seed": int(getattr(args, "calibration_seed", fold_seed)),
+            **test,
+        }
         if bool(getattr(model, "use_profile_lora", False)):
             row.update(
                 {
@@ -2438,7 +2487,16 @@ def run_loocv_experiment(
         rows.append(row)
 
         for hook in post_eval_hooks:
-            for item in hook(model, sbj, list(args.subjects), train_loader, test_loader, device, args, sbj_dir):
+            _restore_model_state(model, pristine_post_eval_state, device)
+            hook_params = inspect.signature(hook).parameters
+            if len(hook_params) >= 9:
+                hook_items = hook(model, sbj, list(args.subjects), train_loader, val_loader, test_loader, device, args, sbj_dir)
+            else:
+                hook_items = hook(model, sbj, list(args.subjects), train_loader, test_loader, device, args, sbj_dir)
+            if not _state_dict_matches(model, pristine_post_eval_state):
+                print(f"[HOOK_STATE] {getattr(hook, '__name__', 'post_eval_hook')} mutated model state for {sbj}; restoring best checkpoint state.")
+                _restore_model_state(model, pristine_post_eval_state, device)
+            for item in hook_items:
                 name = item.pop("__summary_name__")
                 extra_rows_by_name.setdefault(name, []).append(item)
         close_loaders(train_loader, val_loader, test_loader)
