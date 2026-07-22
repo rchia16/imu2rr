@@ -122,6 +122,11 @@ from imu_mwl_classify import (
     _load_classification_arrays,
     _target_classes,
 )
+from mwl_rest_low_high import (
+    REST_LOW_HIGH_CLASS_IDS as SHARED_REST_LOW_HIGH_LABELS,
+    REST_LOW_HIGH_CLASS_NAMES as SHARED_REST_LOW_HIGH_CLASS_NAMES,
+    REST_LOW_HIGH_GROUPS as SHARED_REST_LOW_HIGH_GROUPS,
+)
 
 
 IMU_ISSUES_MR = [17, 26, 30]
@@ -1561,9 +1566,9 @@ def mwl_post_eval_hook(model, sbj: str, subjects: List[str], train_loader, test_
     return rows
 
 
-REST_LOW_HIGH_GROUPS = [("rest", [1]), ("low", [2, 3]), ("high", [4, 5])]
-REST_LOW_HIGH_LABELS = (0, 1, 2)
-REST_LOW_HIGH_NAMES = ["0_rest", "1_low", "2_high"]
+REST_LOW_HIGH_GROUPS = [(name, list(ids)) for name, ids in SHARED_REST_LOW_HIGH_GROUPS]
+REST_LOW_HIGH_LABELS = tuple(SHARED_REST_LOW_HIGH_LABELS)
+REST_LOW_HIGH_NAMES = [f"{idx}_{name}" for idx, name in enumerate(SHARED_REST_LOW_HIGH_CLASS_NAMES)]
 
 
 def _parse_variants_3class(text: str) -> List[str]:
