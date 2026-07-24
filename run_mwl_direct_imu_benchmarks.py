@@ -319,6 +319,8 @@ def run_fold(model_name: str, subject: str, subjects: Sequence[str], args: argpa
             "model_name": model_name,
             "checkpoint_or_run_path": str(out_dir),
             "raw_condition": test.raw_condition.astype(str),
+            "group": test.group.astype(str),
+            "raw_index": test.raw_index.astype(int),
             "source_train_subjects": " ".join(train_subjects),
             "source_val_subjects": " ".join(val_subjects),
         }

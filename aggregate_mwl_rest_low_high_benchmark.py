@@ -54,6 +54,8 @@ def load_prediction_csv(path: Path) -> pd.DataFrame:
         raise ValueError(f"{path} missing required prediction columns: {missing}")
     out = df.copy()
     out["source_result_file"] = str(path)
+    if "scope" not in out.columns:
+        out["scope"] = "window"
     return out
 
 
@@ -82,22 +84,66 @@ def adapt_hierarchical_window_csv(path: Path, seed: Optional[int]) -> pd.DataFra
     )
     if "raw_condition" in df.columns:
         out["raw_condition"] = df["raw_condition"].astype(str)
+    out["scope"] = "window"
     return out
 
 
 def discover_prediction_files(roots: Sequence[Path]) -> List[Path]:
     out: List[Path] = []
+
+    def is_under(path: Path, parent: Path) -> bool:
+        try:
+            path.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
     for root in roots:
         if root.is_file():
             out.append(root)
         elif root.exists():
-            rollup = root / "mwl_predictions.csv"
-            if rollup.exists():
-                out.append(rollup)
-                continue
-            out.extend(sorted(root.rglob("mwl_predictions.csv")))
-            out.extend(sorted(root.rglob("*_mwl_predictions_window.csv")))
+            rollup_files = sorted(root.rglob("mwl_predictions.csv"), key=lambda p: (len(p.parts), str(p)))
+            selected_rollups: List[Path] = []
+            for path in rollup_files:
+                parent_dirs = [selected.parent for selected in selected_rollups]
+                if any(is_under(path.parent, parent_dir) for parent_dir in parent_dirs):
+                    continue
+                selected_rollups.append(path)
+            out.extend(selected_rollups)
+
+            for path in sorted(root.rglob("*_mwl_predictions_window.csv")):
+                if any(is_under(path.parent, selected.parent) for selected in selected_rollups):
+                    continue
+                out.append(path)
+            out.extend(sorted(root.rglob("mwl_one_minute_prediction_rows.csv")))
     return list(dict.fromkeys(out))
+
+
+def missing_prediction_root_statuses(roots: Sequence[Path], prediction_files: Sequence[Path]) -> List[Dict[str, object]]:
+    statuses: List[Dict[str, object]] = []
+
+    def contains(root: Path, path: Path) -> bool:
+        if root.is_file():
+            return root == path
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    for root in roots:
+        if any(contains(root, path) for path in prediction_files):
+            continue
+        status: Dict[str, object] = {
+            "path": str(root),
+            "status": "missing",
+            "reason": "no compatible MWL prediction files discovered",
+        }
+        run_status = root / "run_status.csv"
+        if root.is_dir() and run_status.exists():
+            status["run_status_file"] = str(run_status)
+        statuses.append(status)
+    return statuses
 
 
 def load_all_predictions(paths: Sequence[Path]) -> Tuple[pd.DataFrame, List[Dict[str, object]]]:
@@ -139,10 +185,13 @@ def validate_predictions(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = out[col].astype(int)
     for col in ("prob_rest", "prob_low", "prob_high"):
         out[col] = out[col].astype(float)
+    if "scope" not in out.columns:
+        out["scope"] = "window"
+    out["scope"] = out["scope"].fillna("window").astype(str)
     bad_labels = set(out["true_class"].unique()).union(set(out["predicted_class"].unique())) - {0, 1, 2}
     if bad_labels:
         raise ValueError(f"Unexpected class ids outside 0/1/2: {sorted(bad_labels)}")
-    dup_cols = ["model_name", "subject", "seed", "sample_id"]
+    dup_cols = ["scope", "model_name", "subject", "seed", "sample_id"]
     dups = out[out.duplicated(dup_cols, keep=False)]
     if not dups.empty:
         examples = dups[dup_cols].drop_duplicates().head(10).to_dict(orient="records")
@@ -163,18 +212,18 @@ def metrics_dict(y: np.ndarray, pred: np.ndarray) -> Dict[str, float]:
 
 def subject_seed_rows(preds: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for (model, subject, seed), g in preds.groupby(["model_name", "subject", "seed"], dropna=False):
+    for (scope, model, subject, seed), g in preds.groupby(["scope", "model_name", "subject", "seed"], dropna=False):
         y = g["true_class"].to_numpy(dtype=int)
         pred = g["predicted_class"].to_numpy(dtype=int)
-        rows.append({"model_name": model, "subject": subject, "seed": int(seed), **metrics_dict(y, pred)})
+        rows.append({"scope": scope, "model_name": model, "subject": subject, "seed": int(seed), **metrics_dict(y, pred)})
     return pd.DataFrame(rows)
 
 
 def seed_averaged_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    group_cols = ["model_name", "subject", "sample_id"]
+    group_cols = ["scope", "model_name", "subject", "sample_id"]
     for keys, g in preds.groupby(group_cols, dropna=False):
-        model, subject, sample_id = keys
+        scope, model, subject, sample_id = keys
         true_values = sorted(g["true_class"].astype(int).unique())
         if len(true_values) != 1:
             raise ValueError(f"Conflicting true labels for {model} {subject} {sample_id}: {true_values}")
@@ -183,6 +232,7 @@ def seed_averaged_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "model_name": model,
+                "scope": scope,
                 "subject": subject,
                 "sample_id": sample_id,
                 "seed_count": int(g["seed"].nunique()),
@@ -199,16 +249,22 @@ def seed_averaged_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
 
 def subject_seed_averaged_rows(avg_preds: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for (model, subject), g in avg_preds.groupby(["model_name", "subject"], dropna=False):
+    for (scope, model, subject), g in avg_preds.groupby(["scope", "model_name", "subject"], dropna=False):
         y = g["true_class"].to_numpy(dtype=int)
         pred = g["predicted_class"].to_numpy(dtype=int)
-        rows.append({"model_name": model, "subject": subject, **metrics_dict(y, pred), "seed_averaged_inference": True})
+        rows.append({"scope": scope, "model_name": model, "subject": subject, **metrics_dict(y, pred), "seed_averaged_inference": True})
     return pd.DataFrame(rows)
 
 
 def per_class_table_from_rows(preds: pd.DataFrame, *, scope: str) -> pd.DataFrame:
     rows = []
-    for (model, subject), g in preds.groupby(["model_name", "subject"], dropna=False):
+    group_cols = ["model_name", "subject"] if "scope" not in preds.columns else ["scope", "model_name", "subject"]
+    for keys, g in preds.groupby(group_cols, dropna=False):
+        if len(keys) == 3:
+            scope_value, model, subject = keys
+        else:
+            model, subject = keys
+            scope_value = scope
         precision, recall, f1, support = precision_recall_fscore_support(
             g["true_class"].astype(int),
             g["predicted_class"].astype(int),
@@ -219,6 +275,7 @@ def per_class_table_from_rows(preds: pd.DataFrame, *, scope: str) -> pd.DataFram
             rows.append(
                 {
                     "scope": scope,
+                    "prediction_scope": scope_value,
                     "model_name": model,
                     "subject": subject,
                     "class_id": int(class_id),
@@ -234,13 +291,20 @@ def per_class_table_from_rows(preds: pd.DataFrame, *, scope: str) -> pd.DataFram
 
 def confusion_rows(preds: pd.DataFrame, *, scope: str) -> pd.DataFrame:
     rows = []
-    for (model, subject), g in preds.groupby(["model_name", "subject"], dropna=False):
+    group_cols = ["model_name", "subject"] if "scope" not in preds.columns else ["scope", "model_name", "subject"]
+    for keys, g in preds.groupby(group_cols, dropna=False):
+        if len(keys) == 3:
+            scope_value, model, subject = keys
+        else:
+            model, subject = keys
+            scope_value = scope
         cm = confusion_matrix(g["true_class"].astype(int), g["predicted_class"].astype(int), labels=[0, 1, 2])
         for i, true_name in enumerate(REST_LOW_HIGH_CLASS_NAMES):
             for j, pred_name in enumerate(REST_LOW_HIGH_CLASS_NAMES):
                 rows.append(
                     {
                         "scope": scope,
+                        "prediction_scope": scope_value,
                         "model_name": model,
                         "subject": subject,
                         "true_class": true_name,
@@ -253,9 +317,15 @@ def confusion_rows(preds: pd.DataFrame, *, scope: str) -> pd.DataFrame:
 
 def benchmark_table(subject_avg: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for model, g in subject_avg.groupby("model_name", dropna=False):
+    group_cols = ["scope", "model_name"] if "scope" in subject_avg.columns else ["model_name"]
+    for keys, g in subject_avg.groupby(group_cols, dropna=False):
+        if isinstance(keys, tuple):
+            scope, model = keys
+        else:
+            scope, model = "window", keys
         rows.append(
             {
+                "scope": scope,
                 "model_name": model,
                 "n_subjects": int(g["subject"].nunique()),
                 "mean_subject_accuracy": float(g["accuracy"].mean()),
@@ -266,7 +336,7 @@ def benchmark_table(subject_avg: pd.DataFrame) -> pd.DataFrame:
                 "primary_metrics": "macro_f1,balanced_accuracy",
             }
         )
-    return pd.DataFrame(rows).sort_values(["mean_subject_macro_f1", "mean_subject_balanced_accuracy"], ascending=False)
+    return pd.DataFrame(rows).sort_values(["scope", "mean_subject_macro_f1", "mean_subject_balanced_accuracy"], ascending=[True, False, False])
 
 
 def signflip_p(diff: np.ndarray, permutations: int, seed: int) -> float:
@@ -316,33 +386,38 @@ def paired_tests(subject_avg: pd.DataFrame, best_a1: Optional[str], permutations
     if not best_a1:
         return pd.DataFrame()
     rows = []
-    wide = subject_avg.pivot_table(index="subject", columns="model_name", values="macro_f1", aggfunc="mean")
-    if best_a1 not in wide.columns:
-        return pd.DataFrame()
-    for comparator in PLANNED_COMPARATORS:
-        if comparator not in wide.columns or comparator == best_a1:
+    if "scope" not in subject_avg.columns:
+        subject_avg = subject_avg.copy()
+        subject_avg["scope"] = "window"
+    for scope, scoped in subject_avg.groupby("scope", dropna=False):
+        wide = scoped.pivot_table(index="subject", columns="model_name", values="macro_f1", aggfunc="mean")
+        if best_a1 not in wide.columns:
             continue
-        paired = wide[[best_a1, comparator]].dropna()
-        if paired.empty:
-            continue
-        diff = paired[best_a1].to_numpy(dtype=float) - paired[comparator].to_numpy(dtype=float)
-        lo, hi = bootstrap_ci(diff, bootstrap_resamples, seed=len(rows) + 17)
-        rows.append(
-            {
-                "reference": best_a1,
-                "comparator": comparator,
-                "metric": "macro_f1",
-                "median_paired_difference_reference_minus_comparator": float(np.median(diff)),
-                "ci95_low": lo,
-                "ci95_high": hi,
-                "improved_subjects": int(np.sum(diff > 0)),
-                "tied_subjects": int(np.sum(np.isclose(diff, 0.0))),
-                "worsened_subjects": int(np.sum(diff < 0)),
-                "p_value": signflip_p(diff, permutations, seed=len(rows) + 101),
-                "n_subjects": int(diff.size),
-                "statistical_unit": "held-out subject",
-            }
-        )
+        for comparator in PLANNED_COMPARATORS:
+            if comparator not in wide.columns or comparator == best_a1:
+                continue
+            paired = wide[[best_a1, comparator]].dropna()
+            if paired.empty:
+                continue
+            diff = paired[best_a1].to_numpy(dtype=float) - paired[comparator].to_numpy(dtype=float)
+            lo, hi = bootstrap_ci(diff, bootstrap_resamples, seed=len(rows) + 17)
+            rows.append(
+                {
+                    "scope": scope,
+                    "reference": best_a1,
+                    "comparator": comparator,
+                    "metric": "macro_f1",
+                    "median_paired_difference_reference_minus_comparator": float(np.median(diff)),
+                    "ci95_low": lo,
+                    "ci95_high": hi,
+                    "improved_subjects": int(np.sum(diff > 0)),
+                    "tied_subjects": int(np.sum(np.isclose(diff, 0.0))),
+                    "worsened_subjects": int(np.sum(diff < 0)),
+                    "p_value": signflip_p(diff, permutations, seed=len(rows) + 101),
+                    "n_subjects": int(diff.size),
+                    "statistical_unit": "held-out subject",
+                }
+            )
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
@@ -352,6 +427,8 @@ def paired_tests(subject_avg: pd.DataFrame, best_a1: Optional[str], permutations
 
 def choose_strongest_a1(table: pd.DataFrame) -> Optional[str]:
     a1 = table[table["model_name"].astype(str).str.startswith("a1_")].copy()
+    if "scope" in a1.columns and "window" in set(a1["scope"].astype(str)):
+        a1 = a1[a1["scope"].astype(str) == "window"].copy()
     if a1.empty:
         return None
     a1 = a1.sort_values(["mean_subject_macro_f1", "mean_subject_balanced_accuracy"], ascending=False)
@@ -372,10 +449,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
     roots = [Path(p) for p in args.prediction_roots]
     files = discover_prediction_files(roots)
+    root_status = missing_prediction_root_statuses(roots, files)
     preds, load_status = load_all_predictions(files)
+    load_status.extend(root_status)
     preds = validate_predictions(preds)
     if args.subjects:
         keep_subjects = set(parse_list(args.subjects))
